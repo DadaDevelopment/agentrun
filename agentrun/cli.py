@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -184,6 +185,7 @@ def render(repo: Path, spec: dict, args: argparse.Namespace) -> Path:
     }
     state = repo / ".agentrun"
     (state / "agent").mkdir(parents=True, exist_ok=True)
+    shutil.copy(TOOLS_DIR / "local_agent.py", state / "local_agent.py")
     (state / "agent" / "config.json").write_text(json.dumps(config, ensure_ascii=False, indent=1))
     (state / "agent" / "agent-card.json").write_text(json.dumps(card, ensure_ascii=False, indent=1))
     env = {
