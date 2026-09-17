@@ -70,18 +70,33 @@ jobs:
           agentrun smoke --timeout 240
 
       - name: Install eval deps
-        working-directory: tg-agent-tools
         run: |
           python -m pip install --upgrade pip
-          pip install httpx
+          pip install httpx langfuse pyyaml
 
-      - name: Run eval suite with report
-        working-directory: tg-agent-tools
+      - name: Sync eval cases into Langfuse dataset
+        env:
+          LANGFUSE_PUBLIC_KEY: ${{ secrets.LANGFUSE_PUBLIC_KEY }}
+          LANGFUSE_SECRET_KEY: ${{ secrets.LANGFUSE_SECRET_KEY }}
+          LANGFUSE_HOST: ${{ secrets.LANGFUSE_HOST }}
         run: |
-          python3 ../scripts/eval_report.py \
+          python3 scripts/langfuse_sync_dataset.py \
+            --file evals/tg-exchange-support.yaml \
+            --dataset tg-exchange-support
+
+      - name: Run Langfuse dataset experiment
+        env:
+          LANGFUSE_PUBLIC_KEY: ${{ secrets.LANGFUSE_PUBLIC_KEY }}
+          LANGFUSE_SECRET_KEY: ${{ secrets.LANGFUSE_SECRET_KEY }}
+          LANGFUSE_HOST: ${{ secrets.LANGFUSE_HOST }}
+        run: |
+          python3 scripts/langfuse_experiment.py \
+            --dataset tg-exchange-support \
             --url http://127.0.0.1:18081/ \
-            --output-dir eval-artifacts \
+            --run-name "ci-${{ github.run_id }}-${{ inputs.label || 'nightly' }}" \
             --label "${{ inputs.label || 'nightly' }}" \
+            --output-dir tg-agent-tools/eval-artifacts \
+            --max-concurrency 3 \
             --fail-below 0.1
 
       - name: Publish history and dashboard

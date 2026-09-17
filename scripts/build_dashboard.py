@@ -30,6 +30,8 @@ def render(runs: list[dict]) -> str:
     rates = [r["pass_rate"] for r in runs]
     rows = []
     for r in runs[-30:]:
+        lf = r.get("langfuse") or {}
+        run_cell = f'<a href="{lf["dataset_run_url"]}">langfuse</a>' if lf.get("dataset_run_url") else ""
         rows.append(
             "<tr>"
             f"<td>{r['ts']}</td>"
@@ -38,6 +40,7 @@ def render(runs: list[dict]) -> str:
             f"<td>{r['pass_rate']:.0%}</td>"
             f"<td>{r['wall_s']}s</td>"
             f"<td><code>{(r.get('git') or {}).get('sha', '')[:7]}</code></td>"
+            f"<td>{run_cell}</td>"
             "</tr>"
         )
     scenario_stats = {}
@@ -70,7 +73,7 @@ def render(runs: list[dict]) -> str:
 <h2>Scenario stability (all history)</h2>
 <table><tr><th>scenario</th><th>pass rate</th></tr>{''.join(scenario_rows)}</table>
 <h2>Recent runs</h2>
-<table><tr><th>ts</th><th>label</th><th>score</th><th>rate</th><th>wall</th><th>commit</th></tr>{''.join(rows)}</table>
+<table><tr><th>ts</th><th>label</th><th>score</th><th>rate</th><th>wall</th><th>commit</th><th>trace</th></tr>{''.join(rows)}</table>
 </body></html>"""
 
 
