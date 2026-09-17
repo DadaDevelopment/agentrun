@@ -30,14 +30,11 @@ or `pipx install git+https://github.com/DadaDevelopment/agentrun`. Stdlib only, 
 
 ## Prerequisites
 
-| Need | Why |
-|------|-----|
-| Docker with compose v2 | runs the 5 containers. On Apple Silicon the two ghcr images are amd64 and run under emulation (first turn ~15 s). |
-| `docker login ghcr.io` with a GitHub PAT that has `read:packages` in DadaDevelopment | images are private |
-| `kubectl` pointed at the prod cluster with read access to ns `kagent`, `argocd-prod`, `agent-sandbox-prod`, `databases` | `up` pulls the agent Secret, runtime Deployment env, MCP Deployment env (read-only `kubectl get`, nothing is written), and `--mcp local` port-forwards the MCP Postgres |
-
-Without cluster access `up` still works from the last cached snapshot in
-`<repo>/.agentrun/` (but not `--mcp local`, it needs the DB forward).
+Same as running `eval.py` against prod today: Docker (compose v2), `docker login ghcr.io`
+(GitHub PAT with `read:packages`), and the `kubectl` context you already use for
+`kubectl -n kagent port-forward`. `up` only does `kubectl get` plus one port-forward
+to the MCP Postgres; nothing is written to the cluster. On Apple Silicon the ghcr
+images run under amd64 emulation, first turn ~15 s.
 
 ## Run
 
