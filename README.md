@@ -79,3 +79,35 @@ list.
 
 `.agentrun/` holds the rendered `config.json`, `agent-card.json`, env files
 (mode 0600) and the compose `.env`. Delete it to start clean.
+
+## CI
+
+`.github/workflows/agent-eval.yml` runs the agent nightly (03:00 UTC) and on
+`workflow_dispatch`, against the current `core.md` of the agent repo:
+
+```
+up + smoke  -> agent must answer at all, else the job fails early
+eval suite  -> scripts/eval_report.py wraps eval.py and emits
+               report.json (schema_version, pass_rate, per-scenario, git meta)
+               summary.md (job summary + sticky PR comment)
+               history.jsonl (one line per run)
+dashboard   -> scripts/build_dashboard.py renders the whole history as
+               https://dadadevelopment.github.io/agentrun/ (branch eval-data)
+```
+
+Secrets: `MODEL_API_KEY` (model key), `AGENT_REPO_TOKEN` (clone of the private
+agent repo). The gate is `--fail-below <rate>`: the job fails when the pass
+rate drops under it, so raising the number ratchets quality up as the prompt
+improves.
+
+Use it from another repo's workflow:
+
+```yaml
+jobs:
+  eval:
+    uses: DadaDevelopment/agentrun/.github/workflows/agent-eval.yml@main
+    with:
+      label: pr
+    secrets: inherit
+```
+
