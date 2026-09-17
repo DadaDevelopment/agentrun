@@ -83,22 +83,34 @@ list.
 ## CI
 
 `.github/workflows/agent-eval.yml` runs the agent nightly (03:00 UTC) and on
-`workflow_dispatch`, against the current `core.md` of the agent repo:
+`workflow_dispatch`, against the current `core.md` of the agent repo. One
+source of truth: the cases live in `evals/*.yaml`, are synced into a Langfuse
+dataset, and the experiment run in Langfuse produces the numbers that the CI
+gate and the dashboard both read.
 
 ```
-up + smoke  -> agent must answer at all, else the job fails early
-eval suite  -> scripts/eval_report.py wraps eval.py and emits
-               report.json (schema_version, pass_rate, per-scenario, git meta)
-               summary.md (job summary + sticky PR comment)
-               history.jsonl (one line per run)
-dashboard   -> scripts/build_dashboard.py renders the whole history as
-               https://dadadevelopment.github.io/agentrun/ (branch eval-data)
+up + smoke     agent must answer at all, else the job fails early
+sync dataset   scripts/langfuse_sync_dataset.py pushes evals/*.yaml into a
+               Langfuse dataset (idempotent, items keyed by scenario id)
+experiment     scripts/langfuse_experiment.py runs dataset.run_experiment:
+               every turn is a traced A2A generation, every assertion is a
+               Langfuse score (expect_any_of, expect_none_of, no_internals_leak,
+               scenario_pass, latency_s), plus a run-level pass_rate
+artifacts      report.json (schema_version 2, per-scenario latency + failure
+               reason + trace id + dataset_run_url), summary.md (job summary,
+               sticky PR comment), history.jsonl
+dashboard      scripts/build_dashboard.py renders the whole history with a
+               Langfuse link per run: https://dadadevelopment.github.io/agentrun/
+gate           --fail-below <rate>, reading the same pass_rate Langfuse stored
 ```
 
-Secrets: `MODEL_API_KEY` (model key), `AGENT_REPO_TOKEN` (clone of the private
-agent repo). The gate is `--fail-below <rate>`: the job fails when the pass
-rate drops under it, so raising the number ratchets quality up as the prompt
-improves.
+Secrets: `MODEL_API_KEY`, `AGENT_REPO_TOKEN` (clone of the private agent repo),
+`LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY`, `LANGFUSE_HOST`. Raising
+`--fail-below` ratchets quality up as the prompt improves.
+
+Adding a case is a YAML edit in `evals/`; the next CI run syncs it into the
+dataset and scores it. Nothing is authored in the Langfuse UI, and nothing is
+scored twice.
 
 Use it from another repo's workflow:
 
