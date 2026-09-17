@@ -1,0 +1,119 @@
+name: agent-eval
+
+on:
+  workflow_dispatch:
+    inputs:
+      label:
+        description: "report series label"
+        default: "nightly"
+  schedule:
+    - cron: "0 3 * * *"
+  workflow_call:
+    inputs:
+      label:
+        default: "pr"
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: agent-eval-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  eval:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      AGENT_REPO: tg-agent-tools
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install agentrun from this checkout
+        run: pipx install .
+
+      - name: Clone agent repo
+        run: git clone --depth 1 https://github.com/DadaDevelopment/tg-agent-tools.git
+
+      - name: Write agent spec
+        working-directory: tg-agent-tools
+        run: |
+          cat > agentrun.toml <<'TOML'
+          project = "agent-sandbox"
+          env = "prod"
+          agent = "tg-exchange-support"
+          prompt = "agents/tg-exchange-support/core.md"
+          TOML
+          echo '.agentrun/' >> .gitignore
+
+      - name: Render agent env
+        working-directory: tg-agent-tools
+        run: |
+          umask 077
+          printf 'MODEL_API_KEY=%s\n' "$MODEL_API_KEY" > .agentrun.env
+        env:
+          MODEL_API_KEY: ${{ secrets.MODEL_API_KEY }}
+
+      - name: Start agent
+        working-directory: tg-agent-tools
+        run: |
+          agentrun up
+          agentrun smoke --timeout 240
+
+      - name: Install eval deps
+        working-directory: tg-agent-tools
+        run: |
+          python -m pip install --upgrade pip
+          pip install httpx
+
+      - name: Run eval suite with report
+        working-directory: tg-agent-tools
+        run: |
+          python3 ../scripts/eval_report.py \
+            --url http://127.0.0.1:18081/ \
+            --output-dir eval-artifacts \
+            --label "${{ inputs.label || 'nightly' }}" \
+            --fail-below 0.5
+
+      - name: Build trend dashboard
+        run: |
+          pip install --quiet jinja2
+          python3 scripts/build_dashboard.py \
+            --history tg-agent-tools/eval-artifacts/history.jsonl \
+            --out eval-artifacts/dashboard.html
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eval-report
+          path: |
+            tg-agent-tools/eval-artifacts/report.json
+            tg-agent-tools/eval-artifacts/summary.md
+            eval-artifacts/dashboard.html
+
+      - name: Append history to gh-pages data branch
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        run: |
+          git clone --depth 1 --branch eval-data https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git eval-data 2>/dev/null || (
+            git config user.email "actions@github.com" && git config user.name "github-actions" &&
+            git checkout --orphan eval-data && git rm -rf . && mkdir -p data && cp tg-agent-tools/eval-artifacts/history.jsonl data/history.jsonl &&
+            git add data/history.jsonl && git commit -m "eval history init" && git push origin eval-data && exit 0
+          )
+          cd eval-data
+          cat ../tg-agent-tools/eval-artifacts/history.jsonl >> data/history.jsonl 2>/dev/null || cp ../tg-agent-tools/eval-artifacts/history.jsonl data/history.jsonl
+          git config user.email "actions@github.com"
+          git config user.name "github-actions"
+          git add data/history.jsonl
+          git commit -m "eval history: $(date -u +%FT%TZ)"
+          git push origin eval-data
+
+      - name: Teardown
+        if: always()
+        working-directory: tg-agent-tools
+        run: agentrun down || true
