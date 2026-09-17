@@ -38,7 +38,7 @@ jobs:
         run: pipx install .
 
       - name: Clone agent repo
-        run: git clone --depth 1 https://github.com/DadaDevelopment/tg-agent-tools.git
+        run: git clone --depth 1 "https://x-access-token:${{ secrets.AGENT_REPO_TOKEN }}@github.com/DadaDevelopment/tg-agent-tools.git"
 
       - name: Write agent spec
         working-directory: tg-agent-tools
