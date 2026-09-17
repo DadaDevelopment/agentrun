@@ -103,10 +103,10 @@ jobs:
       - name: Append history to gh-pages data branch
         if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
         run: |
-          git config user.email "actions@github.com"
-          git config user.name "github-actions"
           git clone --depth 1 --branch eval-data https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git eval-data
           cd eval-data
+          git config user.email "actions@github.com"
+          git config user.name "github-actions"
           cat ../tg-agent-tools/eval-artifacts/history.jsonl >> data/history.jsonl
           git add data/history.jsonl
           git commit -m "eval history: $(date -u +%FT%TZ)"
