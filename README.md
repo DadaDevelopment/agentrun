@@ -1,24 +1,17 @@
 # agentrun
 
-Run the production agent chain on your laptop (or a CI box) straight from an
-agent repo such as [tg-agent-tools](https://github.com/DadaDevelopment/tg-agent-tools).
-Same images as prod, same env, same MCP dependencies. The repo is the spec:
-`agents/<name>/core.md` is the prompt, `agents/<name>/domains/*.md` are the
-skills the runtime serves through `load_skill`. Edit, `up`, eval.
+Run a production Dada agent on your laptop (or a CI box) straight from its agent
+repo such as [tg-agent-tools](https://github.com/DadaDevelopment/tg-agent-tools).
+Same image as prod, your prompt, the prod MCP tools. The repo is the spec:
+`agents/<name>/core.md` is the prompt. Edit, `up`, eval.
 
 ```
 eval.py / persona_eval.py --url http://127.0.0.1:18081/   -> agent (A2A), like prod eval
-qa/harness.py  QA_RUNTIME_URL=http://127.0.0.1:18083      -> agent-runtime (/message), full chain
 
-runtime   ghcr.io/dadadevelopment/dada-cloud-console-agent-runtime:<prod tag> + postgres 16 with its migrations
-agent     ghcr.io/dadadevelopment/dada-cloud-kagent-app:<prod tag>, prod config.json, instruction = core.md
-mcp       --mcp local  builds the repo Dockerfile with prod env (prod Postgres via port-forward, prod CRM)
-          --mcp <url>  any MCP server you run yourself
+agent    ghcr.io/dadadevelopment/dada-cloud-kagent-app (public), config.json rendered from the repo
+tools    console (DADA_TOKEN) / agentrun.toml [[tools]] / --mcp URL, in that priority;
+         in-cluster .svc.cluster.local tool URLs are rewritten to the app's public URL
 ```
-
-The prod in-cluster hostnames of runtime and MCP are docker network aliases, so
-the tool manifests stored in the prod `tool_manifests` table resolve to the local
-containers unchanged.
 
 ## Install
 
@@ -26,64 +19,63 @@ containers unchanged.
 uv tool install git+https://github.com/DadaDevelopment/agentrun
 ```
 
-or `pipx install git+https://github.com/DadaDevelopment/agentrun`. Stdlib only, Python >= 3.10.
+or `pipx install git+https://github.com/DadaDevelopment/agentrun`. Stdlib only,
+Python >= 3.10. Prerequisites: Docker (compose v2) and `docker login ghcr.io`
+(a GitHub PAT with `read:packages`). On Apple Silicon the image runs under amd64
+emulation, first turn ~15 s.
 
-## Prerequisites
+## Agent repo setup
 
-Same as running `eval.py` against prod today: Docker (compose v2), `docker login ghcr.io`
-(GitHub PAT with `read:packages`), and the `kubectl` context you already use for
-`kubectl -n kagent port-forward`. `up` only does `kubectl get` plus one port-forward
-to the MCP Postgres; nothing is written to the cluster. On Apple Silicon the ghcr
-images run under amd64 emulation, first turn ~15 s.
+`agentrun.toml` next to `agents/`:
+
+```toml
+project = "agent-sandbox"
+env = "prod"
+agent = "tg-vibecoder"
+prompt = "agents/tg-vibecoder/core.md"
+# optional:
+# model = "glm-5.3-flash"
+# model_base_url = "https://api.z.ai/api/coding/paas/v4"
+# image = "ghcr.io/dadadevelopment/dada-cloud-kagent-app:f74abba2"
+# description = "..."
+# max_tokens = 2048
+# reasoning_effort = "low"
+
+# optional static tools (only needed if DADA_TOKEN is not set):
+# [[tools]]
+# url = "https://tg-agent-tools-624109.dada-tuda.ru/mcp"
+# [tools.headers]
+# Authorization = "Bearer ..."
+```
+
+`.agentrun.env` (gitignored) or the environment:
+
+```bash
+MODEL_API_KEY=...            # required
+MODEL=glm-5.3-flash          # optional
+MODEL_BASE_URL=...           # optional
+DADA_TOKEN=...               # console token, pulls the agent's tools
+# or DADA_CLIENT_ID / DADA_CLIENT_SECRET for the client-credentials flow
+```
 
 ## Run
 
 ```bash
 cd tg-agent-tools
-echo '.agentrun/' >> .gitignore          # snapshot + secrets live there, mode 0600
-agentrun up --mcp local                  # ~2-3 min first time (image pull + MCP build)
-agentrun smoke                           # one turn through /message and through A2A, exit 1 on silence
+echo '.agentrun/' >> .gitignore          # rendered config + env, mode 0600
+agentrun up                              # render + start, first turn needs the image pull
+agentrun smoke                           # one real A2A turn, exit 1 on silence
 python3 eval.py --url http://127.0.0.1:18081/
-agentrun logs -f mcp                     # or agent / runtime
-agentrun down                            # add -v to drop the postgres volume too
+agentrun logs -f
+agentrun down
 ```
 
-Try a prompt experiment without touching `core.md`:
+Prompt edits need `agentrun up` again (config.json is rendered at `up`).
+`agentrun up --core agents/<name>/experiments/foo.md` renders a different prompt
+without touching the repo spec; `up --mcp http://.../mcp` overrides the tool
+list.
 
-```bash
-agentrun up --mcp local --core agents/tg-exchange-support/experiments/foo.md
-```
+## State
 
-`domains/*.md` are read from the working tree on every `load_skill`, no restart
-needed. `core.md` (or `--core`) is baked into the agent config at `up`, so re-run
-`up` after editing it.
-
-Refresh the prod snapshot after a prod deploy: `agentrun up --mcp local --pull`.
-
-## CI recipe
-
-```bash
-agentrun up --repo . --mcp local || exit 1
-agentrun smoke --repo . || { agentrun logs --repo . ; agentrun down --repo . -v; exit 1; }
-python3 eval.py --url http://127.0.0.1:18081/; rc=$?
-agentrun down --repo . -v
-exit $rc
-```
-
-Every subcommand exits non-zero on failure. `up` waits for all healthchecks.
-
-## What is and is not prod
-
-- Prod: both images and their tags, agent config.json/agent-card.json, runtime
-  env, MCP env, MCP Postgres (through port-forward), Twenty CRM, GLM model key.
-  Smoke and eval turns therefore create real CRM contacts under the eval chat ids.
-- Local: postgres for agent-runtime conversation state (fresh per `up -v`),
-  redis for MCP, in-memory A2A session store (`build(local=True)` instead of the
-  kagent controller), OTEL/Langfuse disabled.
-- Direct A2A (`eval.py`) has no `x-dada-*` headers, so `load_skill` returns 403
-  on that leg exactly as against prod. The `/message` leg has the full chain.
-
-## Ports
-
-agent `18081`, runtime `18083`, mcp `18000`, DB forward `18432`. Override with
-`--agent-port/--runtime-port/--mcp-port/--db-port`.
+`.agentrun/` holds the rendered `config.json`, `agent-card.json`, env files
+(mode 0600) and the compose `.env`. Delete it to start clean.

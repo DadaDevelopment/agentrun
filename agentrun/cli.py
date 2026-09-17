@@ -1,9 +1,9 @@
 """agentrun: run a Dada agent from its repo on a laptop or CI box.
 
 The repo is the spec: ``agentrun.toml`` names project/env/agent and the prompt
-file, ``domains/*.md`` are served by the MCP tools server. Tool URLs and headers
-come from the console (``DADA_TOKEN``) or from ``[[tools]]`` in agentrun.toml.
-Model credentials come from ``MODEL_API_KEY`` / ``MODEL`` / ``MODEL_BASE_URL``
+file (default ``agents/<name>/core.md``). Tool URLs and headers come from the
+console (``DADA_TOKEN``) or from ``[[tools]]`` in agentrun.toml. Model
+credentials come from ``MODEL_API_KEY`` / ``MODEL`` / ``MODEL_BASE_URL``
 in the environment or ``.agentrun.env`` next to agentrun.toml. No kubectl, no
 docker login: only Docker and the public agent image.
 """
