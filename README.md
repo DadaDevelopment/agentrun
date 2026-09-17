@@ -8,7 +8,7 @@ Same image as prod, your prompt, the prod MCP tools. The repo is the spec:
 ```
 eval.py / persona_eval.py --url http://127.0.0.1:18081/   -> agent (A2A), like prod eval
 
-agent    ghcr.io/dadadevelopment/dada-cloud-kagent-app (public), config.json rendered from the repo
+agent    ghcr.io/kagent-dev/kagent/app (upstream, public), config.json rendered from the repo
 tools    console (DADA_TOKEN) / agentrun.toml [[tools]] / --mcp URL, in that priority;
          in-cluster .svc.cluster.local tool URLs are rewritten to the app's public URL
 ```
@@ -36,7 +36,7 @@ prompt = "agents/tg-vibecoder/core.md"
 # optional:
 # model = "glm-5.3-flash"
 # model_base_url = "https://api.z.ai/api/coding/paas/v4"
-# image = "ghcr.io/dadadevelopment/dada-cloud-kagent-app:f74abba2"
+# image = "ghcr.io/kagent-dev/kagent/app:0.10.0-rc3"
 # description = "..."
 # max_tokens = 2048
 # reasoning_effort = "low"

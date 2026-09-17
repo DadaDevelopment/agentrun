@@ -27,7 +27,7 @@ TOOLS_DIR = Path(__file__).resolve().parent
 COMPOSE_FILE = TOOLS_DIR / "compose.yaml"
 CONSOLE = "https://console.dada-tuda.ru"
 TOKEN_URL = "https://id.dada-tuda.ru/realms/master/protocol/openid-connect/token"
-DEFAULT_AGENT_IMAGE = "ghcr.io/dadadevelopment/dada-cloud-kagent-app:f74abba2"
+DEFAULT_AGENT_IMAGE = "ghcr.io/kagent-dev/kagent/app:0.10.0-rc3"
 DEFAULT_MODEL = "glm-5.3-flash"
 DEFAULT_MODEL_BASE_URL = "https://api.z.ai/api/coding/paas/v4"
 

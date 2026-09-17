@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "agentrun"
 version = "0.1.0"
-description = "Run the production Dada agent chain (agent-runtime + kagent agent + MCP) on a laptop or CI box from an agent repo"
+description = "Run a production Dada agent from its repo on a laptop or CI box"
 requires-python = ">=3.10"
 dependencies = []
 
