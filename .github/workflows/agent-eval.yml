@@ -48,6 +48,9 @@ jobs:
           env = "prod"
           agent = "tg-exchange-support"
           prompt = "agents/tg-exchange-support/core.md"
+
+          [[tools]]
+          url = "https://tg-agent-tools-624109.dada-tuda.ru/mcp"
           TOML
           echo '.agentrun/' >> .gitignore
 
