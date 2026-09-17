@@ -5,7 +5,7 @@ services:
     entrypoint: ["/.kagent/.venv/bin/python", "/agentrun/local_agent.py"]
     env_file: ${AGENTRUN_STATE}/agent.env
     volumes:
-      - ${AGENTRUN_TOOLS}/local_agent.py:/agentrun/local_agent.py:ro
+      - ${AGENTRUN_STATE}/local_agent.py:/agentrun/local_agent.py:ro
       - ${AGENTRUN_STATE}/agent:/config:ro
     ports:
       - "${AGENT_PORT}:8080"
