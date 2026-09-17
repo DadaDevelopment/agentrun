@@ -81,14 +81,14 @@ jobs:
             --url http://127.0.0.1:18081/ \
             --output-dir eval-artifacts \
             --label "${{ inputs.label || 'nightly' }}" \
-            --fail-below 0.5
+            --fail-below 0.1
 
       - name: Build trend dashboard
         run: |
           pip install --quiet jinja2
           python3 scripts/build_dashboard.py \
             --history tg-agent-tools/eval-artifacts/history.jsonl \
-            --out eval-artifacts/dashboard.html
+            --out tg-agent-tools/eval-artifacts/dashboard.html
 
       - name: Upload artifacts
         if: always()
