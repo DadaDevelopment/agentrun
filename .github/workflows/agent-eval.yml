@@ -16,6 +16,7 @@ on:
 
 permissions:
   contents: write
+  pull-requests: write
 
 concurrency:
   group: agent-eval-${{ github.event_name }}-${{ github.ref }}
@@ -83,12 +84,45 @@ jobs:
             --label "${{ inputs.label || 'nightly' }}" \
             --fail-below 0.1
 
-      - name: Build trend dashboard
+      - name: Publish history and dashboard
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
         run: |
-          pip install --quiet jinja2
+          git clone --depth 1 --branch eval-data https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git eval-data
+          cd eval-data
+          git config user.email "actions@github.com"
+          git config user.name "github-actions"
+          cat ../tg-agent-tools/eval-artifacts/history.jsonl >> data/history.jsonl
+          python3 ../scripts/build_dashboard.py --history data/history.jsonl --out index.html
+          cp index.html ../tg-agent-tools/eval-artifacts/dashboard.html
+          git add data/history.jsonl index.html
+          git commit -m "eval history: $(date -u +%FT%TZ)"
+          git push origin eval-data
+
+      - name: Build dashboard from this run only
+        if: github.event_name != 'schedule' && github.event_name != 'workflow_dispatch'
+        run: |
           python3 scripts/build_dashboard.py \
             --history tg-agent-tools/eval-artifacts/history.jsonl \
             --out tg-agent-tools/eval-artifacts/dashboard.html
+
+      - name: Comment report on PR
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const body = fs.readFileSync('tg-agent-tools/eval-artifacts/summary.md', 'utf8');
+            const marker = '<!-- agent-eval-report -->';
+            const { data: comments } = await github.rest.issues.listComments({
+              issue_number: context.issue.number, owner: context.repo.owner, repo: context.repo.repo,
+            });
+            const existing = comments.find(c => c.body.includes(marker));
+            const payload = marker + '\n' + body;
+            if (existing) {
+              await github.rest.issues.updateComment({ comment_id: existing.id, owner: context.repo.owner, repo: context.repo.repo, body: payload });
+            } else {
+              await github.rest.issues.createComment({ issue_number: context.issue.number, owner: context.repo.owner, repo: context.repo.repo, body: payload });
+            }
 
       - name: Upload artifacts
         if: always()
@@ -98,19 +132,7 @@ jobs:
           path: |
             tg-agent-tools/eval-artifacts/report.json
             tg-agent-tools/eval-artifacts/summary.md
-            eval-artifacts/dashboard.html
-
-      - name: Append history to gh-pages data branch
-        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
-        run: |
-          git clone --depth 1 --branch eval-data https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git eval-data
-          cd eval-data
-          git config user.email "actions@github.com"
-          git config user.name "github-actions"
-          cat ../tg-agent-tools/eval-artifacts/history.jsonl >> data/history.jsonl
-          git add data/history.jsonl
-          git commit -m "eval history: $(date -u +%FT%TZ)"
-          git push origin eval-data
+            tg-agent-tools/eval-artifacts/dashboard.html
 
       - name: Teardown
         if: always()
