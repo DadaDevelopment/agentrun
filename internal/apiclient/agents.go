@@ -1,11 +1,13 @@
 package apiclient
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"net/url"
 	"strings"
+	"time"
 )
 
 // Agent is one agent as the console knows it in an environment.
@@ -118,4 +120,124 @@ func (c *Client) AgentByName(ctx context.Context, projectID, envID, name string)
 	return Agent{}, fmt.Errorf("no agent %q in this environment (console knows: %s)", name, strings.Join(known, ", "))
 }
 
-var _ = json.Marshal
+// AgentToolHeader is one header attached to a tool call.
+type AgentToolHeader struct {
+	Name  string `json:"name"`
+	Value string `json:"value"`
+}
+
+// AgentToolSpec is one tool as sent to the console when saving an agent.
+type AgentToolSpec struct {
+	Name           string            `json:"name"`
+	URL            string            `json:"url,omitempty"`
+	Description    string            `json:"description,omitempty"`
+	Timeout        string            `json:"timeout,omitempty"`
+	Protocol       string            `json:"protocol,omitempty"`
+	Headers        []AgentToolHeader `json:"headers,omitempty"`
+	AllowedHeaders []string          `json:"allowed_headers,omitempty"`
+}
+
+// SaveAgentRequest is the console's create-or-update contract. A field left
+// empty keeps its current value, so a prompt-only deploy does not drop the
+// model, the runtime or the tools.
+type SaveAgentRequest struct {
+	Name          string          `json:"name"`
+	DisplayName   string          `json:"display_name,omitempty"`
+	Description   string          `json:"description,omitempty"`
+	Prompt        string          `json:"prompt,omitempty"`
+	PromptVersion string          `json:"prompt_version,omitempty"`
+	ModelConfig   string          `json:"model_config,omitempty"`
+	Runtime       string          `json:"runtime,omitempty"`
+	Tools         []AgentToolSpec `json:"tools,omitempty"`
+}
+
+// Operation is an async platform write. The console never commits to the
+// infrastructure repo inside the request: it queues an operation the gitops
+// agent renders and commits, so a deploy is finished when this reaches a
+// terminal status, not when the POST returns.
+type Operation struct {
+	ID     string `json:"id"`
+	Status string `json:"status"`
+	Error  string `json:"error_message"`
+}
+
+// Done reports whether the operation will not change any further.
+//
+// Committed counts as terminal, not as a stage on the way to Ready: the gitops
+// agent ends an agent write at Committed and nothing advances that row
+// afterwards. Waiting for Ready therefore hangs until the timeout on a deploy
+// that already succeeded. This mirrors classifyOperationStatus in the console,
+// which is the platform's own definition.
+func (o Operation) Done() bool {
+	switch o.Status {
+	case "Committed", "Ready", "Failed", "Cancelled":
+		return true
+	}
+	return false
+}
+
+// OK reports whether the operation finished successfully.
+func (o Operation) OK() bool {
+	return o.Status == "Committed" || o.Status == "Ready"
+}
+
+// SaveAgent creates or updates an agent and returns the queued operation.
+func (c *Client) SaveAgent(ctx context.Context, projectID, envID string, req SaveAgentRequest) (Operation, error) {
+	body, err := json.Marshal(req)
+	if err != nil {
+		return Operation{}, err
+	}
+	var payload struct {
+		Operation Operation `json:"operation"`
+	}
+	path := fmt.Sprintf("/projects/%s/environments/%s/agents", projectID, envID)
+	if err := c.doJSON(ctx, "POST", path, bytes.NewReader(body), "application/json", &payload); err != nil {
+		return Operation{}, err
+	}
+	return payload.Operation, nil
+}
+
+// GetOperation reads one operation's current state.
+func (c *Client) GetOperation(ctx context.Context, projectID, operationID string) (Operation, error) {
+	var payload struct {
+		Operation Operation `json:"operation"`
+	}
+	path := fmt.Sprintf("/projects/%s/operations/%s", projectID, operationID)
+	if err := c.doJSON(ctx, "GET", path, nil, "", &payload); err != nil {
+		return Operation{}, err
+	}
+	if payload.Operation.ID == "" {
+		var direct Operation
+		if err := c.doJSON(ctx, "GET", path, nil, "", &direct); err != nil {
+			return Operation{}, err
+		}
+		return direct, nil
+	}
+	return payload.Operation, nil
+}
+
+// WaitOperation polls until the operation reaches a terminal status. Each
+// observed status is reported through onStatus so a CLI can show progress.
+func (c *Client) WaitOperation(ctx context.Context, projectID, operationID string, limit time.Duration, onStatus func(string)) (Operation, error) {
+	deadline := time.Now().Add(limit)
+	last := ""
+	for time.Now().Before(deadline) {
+		op, err := c.GetOperation(ctx, projectID, operationID)
+		if err != nil {
+			return Operation{}, err
+		}
+		if op.Status != last && onStatus != nil {
+			onStatus(op.Status)
+			last = op.Status
+		}
+		if op.Done() {
+			return op, nil
+		}
+		select {
+		case <-ctx.Done():
+			return Operation{}, ctx.Err()
+		case <-time.After(2 * time.Second):
+		}
+	}
+	return Operation{}, fmt.Errorf("operation %s did not finish within %s (last status %q)", operationID, limit, last)
+}

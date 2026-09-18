@@ -31,8 +31,10 @@ func usage() {
 	fmt.Fprintln(os.Stderr, "  --upload            skip git and upload the folder as an archive")
 	fmt.Fprintln(os.Stderr, "")
 	fmt.Fprintln(os.Stderr, "agent actions:")
-	fmt.Fprintln(os.Stderr, "  spec             show what the manifest resolves to")
-	fmt.Fprintln(os.Stderr, "  up               start the agent locally from its spec")
+	fmt.Fprintln(os.Stderr, "  spec             show what this repo resolves to")
+	fmt.Fprintln(os.Stderr, "  up               start the agent locally from this repo")
+	fmt.Fprintln(os.Stderr, "  deploy           ship this repo's agent to the platform")
+	fmt.Fprintln(os.Stderr, "  eval             run the eval suites against a local agent")
 	fmt.Fprintln(os.Stderr, "  smoke            send one real turn, exit 1 on silence")
 	fmt.Fprintln(os.Stderr, "  logs             stream the agent's logs")
 	fmt.Fprintln(os.Stderr, "  down             stop the agent")
@@ -43,6 +45,10 @@ func usage() {
 	fmt.Fprintln(os.Stderr, "  --prompt <file>     run a different prompt without touching the spec")
 	fmt.Fprintln(os.Stderr, "  --mcp <url>         override the tool servers (repeatable)")
 	fmt.Fprintln(os.Stderr, "  --port <n>          local A2A port (default: 18081)")
+	fmt.Fprintln(os.Stderr, "  --project <name>    deploy target, asked once then remembered")
+	fmt.Fprintln(os.Stderr, "  --env <name>        deploy target environment")
+	fmt.Fprintln(os.Stderr, "  --suite <name>      eval suite to run (default: every suite)")
+	fmt.Fprintln(os.Stderr, "  --dry-run           show what deploy would send, send nothing")
 }
 
 func main() {
@@ -118,7 +124,7 @@ func parseDeployArgs(args []string) (cliapp.DeployOptions, error) {
 }
 
 func agentUsage() {
-	fmt.Fprintln(os.Stderr, "usage: ddc agent <spec|up|smoke|logs|down> [flags]")
+	fmt.Fprintln(os.Stderr, "usage: ddc agent <spec|up|smoke|eval|deploy|logs|down> [flags]")
 }
 
 func runAgent(ctx context.Context, cfg cliapp.Config, args []string, out io.Writer) error {
@@ -130,6 +136,9 @@ func runAgent(ctx context.Context, cfg cliapp.Config, args []string, out io.Writ
 	opts := cliapp.AgentOptions{
 		Repo: ".", Port: 18081, Text: "Привет", Tail: "200", Timeout: 180 * time.Second,
 	}
+	if action == "deploy" {
+		opts.Timeout = 10 * time.Minute
+	}
 	rest := args[1:]
 	for i := 0; i < len(rest); {
 		needsValue := func() (string, error) {
@@ -139,7 +148,8 @@ func runAgent(ctx context.Context, cfg cliapp.Config, args []string, out io.Writ
 			return rest[i+1], nil
 		}
 		switch rest[i] {
-		case "--repo", "--agent", "--prompt", "--mcp", "--port", "--text", "--tail", "--timeout":
+		case "--repo", "--agent", "--prompt", "--mcp", "--port", "--text", "--tail", "--timeout",
+			"--project", "--env", "--suite":
 			value, err := needsValue()
 			if err != nil {
 				return err
@@ -163,6 +173,12 @@ func runAgent(ctx context.Context, cfg cliapp.Config, args []string, out io.Writ
 				opts.Text = value
 			case "--tail":
 				opts.Tail = value
+			case "--project":
+				opts.Project = value
+			case "--env":
+				opts.Env = value
+			case "--suite":
+				opts.Suite = value
 			case "--timeout":
 				seconds, err := strconv.Atoi(value)
 				if err != nil {
@@ -174,6 +190,9 @@ func runAgent(ctx context.Context, cfg cliapp.Config, args []string, out io.Writ
 		case "-f", "--follow":
 			opts.Follow = true
 			i++
+		case "--dry-run":
+			opts.DryRun = true
+			i++
 		default:
 			return fmt.Errorf("unknown flag %q", rest[i])
 		}
@@ -184,6 +203,10 @@ func runAgent(ctx context.Context, cfg cliapp.Config, args []string, out io.Writ
 		return cliapp.AgentSpec(opts, out)
 	case "up":
 		return cliapp.AgentUp(ctx, cfg, opts, out)
+	case "deploy":
+		return cliapp.AgentDeploy(ctx, cfg, opts, out)
+	case "eval":
+		return cliapp.AgentEval(ctx, cfg, opts, out)
 	case "smoke":
 		return cliapp.AgentSmoke(opts, out)
 	case "logs":

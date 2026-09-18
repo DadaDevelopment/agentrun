@@ -20,8 +20,8 @@ var localAgentPy []byte
 // the real one; keeping it an interface here means this package never reaches
 // for a session or an HTTP client of its own.
 type ToolResolver interface {
-	AgentTools(project, env, agent string) ([]agentspec.Tool, error)
-	AppURL(project, env, app string) (string, error)
+	AgentTools(agent string) ([]agentspec.Tool, error)
+	AppURL(app string) (string, error)
 }
 
 // resolveTools decides which MCP servers the agent may call, in priority order:
@@ -46,7 +46,7 @@ func resolveTools(spec *agentspec.Spec, opts Options) ([]agentspec.Tool, error) 
 		return tools, nil
 	}
 	if opts.Resolver == nil {
-		return nil, fmt.Errorf("no tools: declare runtime.tools in %s or pass --mcp URL", agentspec.ManifestPath)
+		return nil, fmt.Errorf("no tools: declare them in %s or pass --mcp URL", agentspec.OverridePath)
 	}
 	return consoleTools(spec, opts.Resolver)
 }
@@ -78,11 +78,7 @@ func toolHeaders(t agentspec.Tool) (map[string]string, error) {
 // consoleTools asks the console which tools this agent runs with in its
 // environment, rewriting in-cluster URLs to the app's public URL.
 func consoleTools(spec *agentspec.Spec, resolver ToolResolver) ([]agentspec.Tool, error) {
-	if spec.Console.Project == "" || spec.Console.Env == "" {
-		return nil, fmt.Errorf("no tools: declare runtime.tools in %s, pass --mcp, or set console.project/env",
-			agentspec.ManifestPath)
-	}
-	tools, err := resolver.AgentTools(spec.Console.Project, spec.Console.Env, spec.Name)
+	tools, err := resolver.AgentTools(spec.Name)
 	if err != nil {
 		return nil, err
 	}
@@ -94,7 +90,7 @@ func consoleTools(spec *agentspec.Spec, resolver ToolResolver) ([]agentspec.Tool
 		}
 		if strings.HasSuffix(u.Hostname(), ".svc.cluster.local") {
 			app := strings.TrimSuffix(strings.Split(u.Hostname(), ".")[0], "-service")
-			public, err := resolver.AppURL(spec.Console.Project, spec.Console.Env, app)
+			public, err := resolver.AppURL(app)
 			if err != nil {
 				return nil, fmt.Errorf("tool %s: %w", t.URL, err)
 			}
@@ -103,8 +99,8 @@ func consoleTools(spec *agentspec.Spec, resolver ToolResolver) ([]agentspec.Tool
 		out = append(out, t)
 	}
 	if len(out) == 0 {
-		return nil, fmt.Errorf("the console lists no tools for %s; declare runtime.tools in %s",
-			spec.Name, agentspec.ManifestPath)
+		return nil, fmt.Errorf("the console lists no tools for %s; declare them in %s",
+			spec.Name, agentspec.OverridePath)
 	}
 	return out, nil
 }

@@ -17,87 +17,100 @@ func write(t *testing.T, path, body string) {
 	}
 }
 
-func repoWith(t *testing.T, manifest string) string {
-	t.Helper()
+// TestDiscoverNeedsNoManifest is the point of this package: a repo that just
+// follows the layout works with ddc the moment it is cloned.
+func TestDiscoverNeedsNoManifest(t *testing.T) {
 	dir := t.TempDir()
-	write(t, filepath.Join(dir, ManifestPath), manifest)
-	write(t, filepath.Join(dir, "agents", "a", "core.md"), "prompt")
-	return dir
-}
+	write(t, filepath.Join(dir, "agents", "roman", "core.md"), "be helpful")
+	write(t, filepath.Join(dir, "agents", "roman", "domains", "pricing.md"), "prices")
+	write(t, filepath.Join(dir, "agents", "roman", "evals", "suites", "markers.yaml"), "cases: []")
+	write(t, filepath.Join(dir, "agents", "roman", "judge", "turn.yaml"), "rules: []")
 
-const oneAgent = `{"version":1,"agents":[{"name":"a","agents_root":".","cases":"c.jsonl",
-"holdout_threshold":0.75,"runtime":{"image":"img","model":{"name":"m","api_key_env":"K"},
-"tools":[{"url":"https://x/mcp"}]},"console":{"project":"p","env":"prod"},
-"langfuse":{"dataset_prefix":"pre"}}]}`
-
-func TestLoadResolvesDeclaredLayout(t *testing.T) {
-	dir := repoWith(t, oneAgent)
-	spec, err := Load(dir, "")
+	spec, err := Discover(dir, "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if spec.Name != "a" {
+	if spec.Name != "roman" {
 		t.Fatalf("name = %q", spec.Name)
 	}
-	if spec.Runtime.Image != "img" || spec.Runtime.Model.Name != "m" {
-		t.Fatalf("runtime not read: %+v", spec.Runtime)
+	if len(List(spec.Domains, ".md")) != 1 {
+		t.Fatalf("domains = %v", List(spec.Domains, ".md"))
 	}
-	if len(spec.Runtime.Tools) != 1 || spec.Runtime.Tools[0].URL != "https://x/mcp" {
-		t.Fatalf("tools not read: %+v", spec.Runtime.Tools)
+	if len(List(spec.Suites, ".yaml")) != 1 {
+		t.Fatalf("suites = %v", List(spec.Suites, ".yaml"))
 	}
-	if spec.DatasetPrefix() != "pre" {
-		t.Fatalf("prefix = %q", spec.DatasetPrefix())
+	if len(List(spec.Judges, ".yaml")) != 1 {
+		t.Fatalf("judges = %v", List(spec.Judges, ".yaml"))
 	}
-	if !strings.HasSuffix(spec.Suites, filepath.Join("agents", "a", "evals", "suites")) {
-		t.Fatalf("suites = %q", spec.Suites)
-	}
-	if !strings.HasSuffix(spec.Judges, filepath.Join("agents", "a", "judge")) {
-		t.Fatalf("judges = %q", spec.Judges)
+	if spec.Runtime.Image != "" || spec.Runtime.Model.Name != "" {
+		t.Fatalf("runtime should be empty without an override: %+v", spec.Runtime)
 	}
 }
 
-// The console's reader accepts only version 1, so ddc must refuse anything else
-// rather than write a manifest the platform cannot read.
-func TestLoadRejectsOtherVersions(t *testing.T) {
-	dir := repoWith(t, `{"version":2,"agents":[{"name":"a"}]}`)
-	if _, err := Load(dir, ""); err == nil || !strings.Contains(err.Error(), "version") {
-		t.Fatalf("err = %v", err)
-	}
-}
-
-func TestLoadRequiresAgentNameWhenAmbiguous(t *testing.T) {
+func TestDiscoverReadsOptionalOverride(t *testing.T) {
 	dir := t.TempDir()
-	write(t, filepath.Join(dir, ManifestPath),
-		`{"version":1,"agents":[{"name":"a"},{"name":"b"}]}`)
+	write(t, filepath.Join(dir, "agents", "roman", "core.md"), "p")
+	write(t, filepath.Join(dir, OverridePath), `{"agents":{"roman":{"image":"img:1",
+"model":{"name":"m","api_key_env":"K"},"tools":[{"url":"https://x/mcp","timeout":9}]}}}`)
+
+	spec, err := Discover(dir, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if spec.Runtime.Image != "img:1" || spec.Runtime.Model.Name != "m" {
+		t.Fatalf("runtime = %+v", spec.Runtime)
+	}
+	if len(spec.Runtime.Tools) != 1 || spec.Runtime.Tools[0].Timeout != 9 {
+		t.Fatalf("tools = %+v", spec.Runtime.Tools)
+	}
+}
+
+func TestDiscoverIgnoresOverrideForAnotherAgent(t *testing.T) {
+	dir := t.TempDir()
+	write(t, filepath.Join(dir, "agents", "roman", "core.md"), "p")
+	write(t, filepath.Join(dir, OverridePath), `{"agents":{"other":{"image":"nope"}}}`)
+	spec, err := Discover(dir, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if spec.Runtime.Image != "" {
+		t.Fatalf("image = %q, another agent's override leaked", spec.Runtime.Image)
+	}
+}
+
+func TestDiscoverRequiresANameWhenAmbiguous(t *testing.T) {
+	dir := t.TempDir()
 	write(t, filepath.Join(dir, "agents", "a", "core.md"), "p")
 	write(t, filepath.Join(dir, "agents", "b", "core.md"), "p")
-	if _, err := Load(dir, ""); err == nil || !strings.Contains(err.Error(), "--agent") {
+	if _, err := Discover(dir, ""); err == nil || !strings.Contains(err.Error(), "--agent") {
 		t.Fatalf("err = %v", err)
 	}
-	spec, err := Load(dir, "b")
+	spec, err := Discover(dir, "b")
 	if err != nil || spec.Name != "b" {
 		t.Fatalf("spec = %+v err = %v", spec, err)
 	}
+	if _, err := Discover(dir, "missing"); err == nil {
+		t.Fatal("an unknown agent name must fail")
+	}
 }
 
-func TestLoadReportsMissingManifestAndPrompt(t *testing.T) {
-	if _, err := Load(t.TempDir(), ""); err == nil || !strings.Contains(err.Error(), "declares no agent") {
+func TestDiscoverReportsAnEmptyRepo(t *testing.T) {
+	if _, err := Discover(t.TempDir(), ""); err == nil || !strings.Contains(err.Error(), "core.md") {
 		t.Fatalf("err = %v", err)
 	}
+}
+
+func TestDiscoverSkipsDirectoriesWithoutAPrompt(t *testing.T) {
 	dir := t.TempDir()
-	write(t, filepath.Join(dir, ManifestPath), `{"version":1,"agents":[{"name":"a"}]}`)
-	if _, err := Load(dir, ""); err == nil || !strings.Contains(err.Error(), "core.md") {
-		t.Fatalf("err = %v", err)
+	if err := os.MkdirAll(filepath.Join(dir, "agents", "scratch"), 0o755); err != nil {
+		t.Fatal(err)
 	}
-}
-
-func TestDatasetPrefixFallsBackToName(t *testing.T) {
-	dir := repoWith(t, `{"version":1,"agents":[{"name":"a"}]}`)
-	spec, err := Load(dir, "")
+	write(t, filepath.Join(dir, "agents", "real", "core.md"), "p")
+	spec, err := Discover(dir, "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if spec.DatasetPrefix() != "a" {
-		t.Fatalf("prefix = %q", spec.DatasetPrefix())
+	if spec.Name != "real" {
+		t.Fatalf("name = %q", spec.Name)
 	}
 }

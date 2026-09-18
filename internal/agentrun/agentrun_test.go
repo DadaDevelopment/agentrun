@@ -15,12 +15,12 @@ import (
 	"github.com/dada-tuda/ddc/internal/agentspec"
 )
 
-func repo(t *testing.T, manifest string) *agentspec.Spec {
+func repo(t *testing.T, override string) *agentspec.Spec {
 	t.Helper()
 	dir := t.TempDir()
-	mustWrite(t, filepath.Join(dir, agentspec.ManifestPath), manifest)
+	mustWrite(t, filepath.Join(dir, agentspec.OverridePath), override)
 	mustWrite(t, filepath.Join(dir, "agents", "a", "core.md"), "be helpful")
-	spec, err := agentspec.Load(dir, "")
+	spec, err := agentspec.Discover(dir, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -37,8 +37,8 @@ func mustWrite(t *testing.T, path, body string) {
 	}
 }
 
-const withTool = `{"version":1,"agents":[{"name":"a","runtime":{"model":{"name":"m","api_key_env":"TEST_KEY"},
-"tools":[{"url":"https://tools/mcp","timeout":7}]}}]}`
+const withTool = `{"agents":{"a":{"model":{"name":"m","api_key_env":"TEST_KEY"},
+"tools":[{"url":"https://tools/mcp","timeout":7}]}}}`
 
 // TestRenderWritesConfigTheAgentCanRead guards two startup failures seen live:
 // a 0600 config the non-root container user could not read, and the model key

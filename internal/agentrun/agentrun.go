@@ -225,6 +225,22 @@ func Up(spec *agentspec.Spec, opts Options, out io.Writer) error {
 	return nil
 }
 
+// Reachable reports whether an agent is answering its health endpoint on port.
+// Callers use it to fail with "start it first" instead of a connection error
+// from deep inside another tool.
+func Reachable(port int) error {
+	client := &http.Client{Timeout: 3 * time.Second}
+	resp, err := client.Get(fmt.Sprintf("http://127.0.0.1:%d/health", port))
+	if err != nil {
+		return fmt.Errorf("no agent answering on port %d", port)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("the agent on port %d is not healthy (HTTP %d)", port, resp.StatusCode)
+	}
+	return nil
+}
+
 // Down removes the agent container.
 func Down(spec *agentspec.Spec, out io.Writer) error {
 	cmd := exec.Command("docker", "rm", "-f", containerName(spec.Name))

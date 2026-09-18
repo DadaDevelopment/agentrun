@@ -26,9 +26,9 @@ Go 1.25, no third-party dependencies. `ddc agent` additionally needs Docker.
 
 ## ddc agent
 
-An agent repo already declares itself in `.dada/agent.json` - the manifest the
-console reads. `ddc agent` reads the same file, so there is no second manifest
-to drift:
+There is no manifest to write. An agent repo is recognised by its layout, and
+`ddc` is already signed in, so nothing in the repo has to name a project, an
+environment or an agent:
 
 ```
 agents/<name>/
@@ -38,57 +38,68 @@ agents/<name>/
   judge/*.yaml         llm-as-judge rules and prompts
 ```
 
-The manifest adds how to run it, so local, CI and prod start the agent from one
-description. `version` stays `1`: the console's reader accepts only version 1
-and ignores keys it does not know, so these fields are additive.
+Everything else has a default. `.dada/agent.json` is optional and holds only
+what genuinely belongs to the repo rather than to a person - a pinned image,
+non-default tools:
 
 ```json
 {
-  "version": 1,
-  "agents": [
-    {
-      "name": "tg-exchange-support",
-      "agents_root": ".",
-      "cases": "evals/referral/cases.jsonl",
-      "holdout_threshold": 0.75,
-      "runtime": {
-        "image": "ghcr.io/kagent-dev/kagent/app:0.10.0-rc3",
-        "model": {
-          "name": "glm-5.3-flash",
-          "base_url": "https://api.z.ai/api/coding/paas/v4",
-          "api_key_env": "MODEL_API_KEY"
-        },
-        "tools": [{ "url": "https://tools.example/mcp" }]
-      },
-      "console": { "project": "agent-sandbox", "env": "prod" },
-      "langfuse": { "dataset_prefix": "tg-exchange-support" }
+  "agents": {
+    "tg-exchange-support": {
+      "image": "ghcr.io/dadadevelopment/kagent-app:v0.10.0-rc3-dada1",
+      "model": { "name": "glm-5.3-flash", "api_key_env": "MODEL_API_KEY" },
+      "tools": [{ "url": "https://tools.example/mcp" }]
     }
-  ]
+  }
 }
 ```
 
 Only the *name* of the key variable is stored. Secrets come from the
 environment or `.ddc/.env` (gitignore `.ddc/`).
 
+Where the agent is deployed is not in the repo either: it is asked once and
+remembered per directory in your own config, exactly as `ddc deploy` remembers
+an app's project. Two people can run the same repo against different
+environments without editing a committed file.
+
 ```bash
 cd my-agent-repo
 ddc agent spec       # what the manifest resolves to - run this when a layout looks wrong
 ddc agent up         # start the agent from the spec
 ddc agent smoke      # one real A2A turn, exit 1 on silence
+ddc agent eval       # run the repo's eval suites against it
+ddc agent deploy --project <name> --env <name>   # asked once, then remembered
 ddc agent logs -f
 ddc agent down
 ```
+
+### Deploy
+
+`ddc agent deploy` reads the repo and calls the console's API. The dependency
+points that way on purpose: production does not read files out of your
+repository, so the layout above is ddc's contract rather than the platform's,
+and the UI is skipped entirely.
+
+CI runs the same two commands a developer runs - `ddc agent eval` and
+`ddc agent deploy` - so a pipeline is never a separate code path. CI has no
+browser, so it authenticates with `DDC_TOKEN`, or with `DDC_SERVICE_CLIENT_ID`
+plus `DDC_SERVICE_CLIENT_SECRET` for the client-credentials grant.
+
+A deploy is finished when its operation reaches `Committed`: the gitops agent
+ends an agent write there and nothing advances that row afterwards.
 
 Flags: `--repo`, `--agent` (when the manifest declares several), `--prompt` to
 try another prompt without touching the spec, `--mcp URL` (repeatable) to
 override the tool servers, `--port` (default 18081).
 
-Tool priority: `--mcp`, then `runtime.tools`, then the console - with
-`console.project`/`env` set, `ddc` asks the API which tools the agent runs with
-in production and rewrites in-cluster URLs to their public ones.
+Tool priority: `--mcp`, then the tools in `.dada/agent.json`, then the console -
+ddc asks the API which tools the agent runs with in its remembered environment
+and rewrites in-cluster URLs to their public ones.
 
-The agent runs in the production kagent image, so the model client, the MCP
-toolset and the A2A server are the prod ones. The rendered config is copied
+The agent runs in the production kagent image - the patched one from
+[DadaDevelopment/kagent](https://github.com/DadaDevelopment/kagent), public so
+no registry login is needed - so what runs locally is what runs in production,
+tracing patch included. The rendered config is copied
 into the container rather than bind-mounted, so a remote or docker-in-docker
 daemon works the same. `up` returns only once the agent answers `/health`.
 

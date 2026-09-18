@@ -1,11 +1,14 @@
-// Package agentspec reads the agent manifest a repo already ships, `.dada/agent.json`,
-// and resolves every path that describes one agent: prompt, skills, runtime, eval
-// suites and judges.
+// Package agentspec finds the agent a repository contains.
 //
-// The manifest is the only file that knows an agent's name, so a rename is one edit.
-// Its version stays 1: the console's own reader (agentkit/repospec.py) accepts only
-// version 1 and ignores keys it does not know, so the fields ddc needs are additive
-// rather than a fork of the format.
+// There is no manifest to write. An agent repo is recognised by its layout -
+// `agents/<name>/core.md` is the prompt, `agents/<name>/domains/*.md` are the
+// skills - and everything else has a default or a flag. A repo that follows
+// the layout works with ddc the moment it is cloned.
+//
+// Where the agent is deployed is not a property of the source tree either: it
+// is remembered per working directory in the user's own config, exactly like
+// `ddc deploy` remembers an app's project. Two people can run the same repo
+// against different environments without editing a committed file.
 package agentspec
 
 import (
@@ -13,173 +16,138 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
+	"strings"
 )
 
-// ManifestPath is the manifest's location inside an agent repo.
-const ManifestPath = ".dada/agent.json"
+// OverridePath is the optional file for settings that genuinely belong to the
+// repo rather than to a person: a pinned image, non-default tools. Most repos
+// do not have one.
+const OverridePath = ".dada/agent.json"
 
-// Model is how to call the LLM. Only the name of the API key variable is stored;
-// a secret never belongs in a file that is committed.
+// Model is how to call the LLM. Only the name of the key variable is stored.
 type Model struct {
-	Name            string `json:"name"`
-	BaseURL         string `json:"base_url"`
-	APIFormat       string `json:"api_format"`
-	MaxTokens       int    `json:"max_tokens"`
-	ReasoningEffort string `json:"reasoning_effort"`
-	APIKeyEnv       string `json:"api_key_env"`
+	Name            string `json:"name,omitempty"`
+	BaseURL         string `json:"base_url,omitempty"`
+	APIFormat       string `json:"api_format,omitempty"`
+	MaxTokens       int    `json:"max_tokens,omitempty"`
+	ReasoningEffort string `json:"reasoning_effort,omitempty"`
+	APIKeyEnv       string `json:"api_key_env,omitempty"`
 }
 
 // Tool is one MCP server the agent may call.
 type Tool struct {
+	Name       string            `json:"name,omitempty"`
 	URL        string            `json:"url"`
-	Headers    map[string]string `json:"headers"`
-	HeadersEnv string            `json:"headers_env"`
-	Timeout    int               `json:"timeout"`
+	Headers    map[string]string `json:"headers,omitempty"`
+	HeadersEnv string            `json:"headers_env,omitempty"`
+	Timeout    int               `json:"timeout,omitempty"`
 }
 
-// Runtime is what the spec never used to describe: with which model, tools and
-// image this agent runs. It lived in cluster manifests, which is why local runs,
-// CI and prod could silently drift apart.
+// Runtime is what the agent runs with. Empty fields fall back to ddc's
+// defaults, so a repo declares only what differs.
 type Runtime struct {
-	Description string `json:"description"`
-	Image       string `json:"image"`
-	Model       Model  `json:"model"`
-	Tools       []Tool `json:"tools"`
+	Description string `json:"description,omitempty"`
+	Image       string `json:"image,omitempty"`
+	Model       Model  `json:"model,omitempty"`
+	Tools       []Tool `json:"tools,omitempty"`
 }
 
-// Console names the project and environment this agent is deployed into, so the
-// CLI can resolve its tool URLs from the API when the manifest lists none.
-type Console struct {
-	Project string `json:"project"`
-	Env     string `json:"env"`
+type override struct {
+	Agents map[string]Runtime `json:"agents"`
 }
 
-// Langfuse carries the naming contract for evaluation results.
-type Langfuse struct {
-	DatasetPrefix string `json:"dataset_prefix"`
-}
-
-type entry struct {
-	Name             string   `json:"name"`
-	AgentsRoot       string   `json:"agents_root"`
-	Cases            string   `json:"cases"`
-	HoldoutThreshold float64  `json:"holdout_threshold"`
-	Suites           string   `json:"suites"`
-	Judges           string   `json:"judges"`
-	Runtime          Runtime  `json:"runtime"`
-	Console          Console  `json:"console"`
-	Langfuse         Langfuse `json:"langfuse"`
-}
-
-type manifest struct {
-	Version int     `json:"version"`
-	Agents  []entry `json:"agents"`
-}
-
-// Spec is one agent's resolved layout: absolute paths plus the declared runtime.
+// Spec is one agent as found in a repository.
 type Spec struct {
-	Repo             string
-	Name             string
-	Dir              string
-	Prompt           string
-	Domains          string
-	Suites           string
-	Judges           string
-	Cases            string
-	HoldoutThreshold float64
-	Runtime          Runtime
-	Console          Console
-	Langfuse         Langfuse
+	Repo    string
+	Name    string
+	Dir     string
+	Prompt  string
+	Domains string
+	Suites  string
+	Judges  string
+	Runtime Runtime
 }
 
-// Load reads the manifest in repo and resolves the named agent. The name may be
-// empty when the manifest declares exactly one agent.
-func Load(repo, name string) (*Spec, error) {
+// Discover finds the agent in repo. The name may be empty when the repo holds
+// exactly one agent, which is the usual case.
+func Discover(repo, name string) (*Spec, error) {
 	abs, err := filepath.Abs(repo)
 	if err != nil {
 		return nil, err
 	}
-	raw, err := os.ReadFile(filepath.Join(abs, ManifestPath))
+	found, err := agentNames(abs)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, fmt.Errorf("no %s: this repo declares no agent", ManifestPath)
-		}
 		return nil, err
 	}
-	var m manifest
-	if err := json.Unmarshal(raw, &m); err != nil {
-		return nil, fmt.Errorf("%s: %w", ManifestPath, err)
-	}
-	if m.Version != 1 {
-		return nil, fmt.Errorf("%s: unsupported version %d, expected 1", ManifestPath, m.Version)
-	}
-	if len(m.Agents) == 0 {
-		return nil, fmt.Errorf("%s: agents must be a non-empty list", ManifestPath)
-	}
-
-	var found *entry
 	switch {
-	case name != "":
-		for i := range m.Agents {
-			if m.Agents[i].Name == name {
-				found = &m.Agents[i]
-			}
-		}
-		if found == nil {
-			return nil, fmt.Errorf("%s: no agent named %q", ManifestPath, name)
-		}
-	case len(m.Agents) == 1:
-		found = &m.Agents[0]
+	case len(found) == 0:
+		return nil, fmt.Errorf("no agent in %s: expected a prompt at agents/<name>/core.md", abs)
+	case name == "" && len(found) > 1:
+		return nil, fmt.Errorf("pass --agent: this repo holds %s", strings.Join(found, ", "))
+	case name == "":
+		name = found[0]
 	default:
-		names := make([]string, 0, len(m.Agents))
-		for _, a := range m.Agents {
-			names = append(names, a.Name)
+		if !contains(found, name) {
+			return nil, fmt.Errorf("no agent %q in %s (found: %s)", name, abs, strings.Join(found, ", "))
 		}
-		return nil, fmt.Errorf("pass --agent: the manifest declares %v", names)
-	}
-	if found.Name == "" {
-		return nil, fmt.Errorf("%s: an agent entry has no name", ManifestPath)
 	}
 
-	root := found.AgentsRoot
-	if root == "" {
-		root = "."
-	}
-	dir := filepath.Join(abs, root, "agents", found.Name)
-	resolve := func(rel, fallback string) string {
-		if rel == "" {
-			return filepath.Join(dir, fallback)
-		}
-		return filepath.Join(abs, rel)
-	}
+	dir := filepath.Join(abs, "agents", name)
 	spec := &Spec{
-		Repo:             abs,
-		Name:             found.Name,
-		Dir:              dir,
-		Prompt:           filepath.Join(dir, "core.md"),
-		Domains:          filepath.Join(dir, "domains"),
-		Suites:           resolve(found.Suites, filepath.Join("evals", "suites")),
-		Judges:           resolve(found.Judges, "judge"),
-		HoldoutThreshold: found.HoldoutThreshold,
-		Runtime:          found.Runtime,
-		Console:          found.Console,
-		Langfuse:         found.Langfuse,
+		Repo:    abs,
+		Name:    name,
+		Dir:     dir,
+		Prompt:  filepath.Join(dir, "core.md"),
+		Domains: filepath.Join(dir, "domains"),
+		Suites:  filepath.Join(dir, "evals", "suites"),
+		Judges:  filepath.Join(dir, "judge"),
 	}
-	if found.Cases != "" {
-		spec.Cases = filepath.Join(abs, found.Cases)
+	runtime, err := loadOverride(abs, name)
+	if err != nil {
+		return nil, err
 	}
-	if _, err := os.Stat(spec.Prompt); err != nil {
-		return nil, fmt.Errorf("%s not found: the manifest points at no prompt", spec.Prompt)
-	}
+	spec.Runtime = runtime
 	return spec, nil
 }
 
-// DatasetPrefix is the Langfuse dataset prefix, defaulting to the agent name.
-func (s *Spec) DatasetPrefix() string {
-	if s.Langfuse.DatasetPrefix != "" {
-		return s.Langfuse.DatasetPrefix
+// agentNames lists the directories under agents/ that hold a prompt.
+func agentNames(repo string) ([]string, error) {
+	entries, err := os.ReadDir(filepath.Join(repo, "agents"))
+	if os.IsNotExist(err) {
+		return nil, nil
 	}
-	return s.Name
+	if err != nil {
+		return nil, err
+	}
+	var names []string
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		if _, err := os.Stat(filepath.Join(repo, "agents", entry.Name(), "core.md")); err == nil {
+			names = append(names, entry.Name())
+		}
+	}
+	sort.Strings(names)
+	return names, nil
+}
+
+// loadOverride reads the optional per-repo runtime settings. A missing file is
+// the normal case, not an error.
+func loadOverride(repo, name string) (Runtime, error) {
+	raw, err := os.ReadFile(filepath.Join(repo, OverridePath))
+	if os.IsNotExist(err) {
+		return Runtime{}, nil
+	}
+	if err != nil {
+		return Runtime{}, err
+	}
+	var file override
+	if err := json.Unmarshal(raw, &file); err != nil {
+		return Runtime{}, fmt.Errorf("%s: %w", OverridePath, err)
+	}
+	return file.Agents[name], nil
 }
 
 // List returns the files in dir with the given extension, sorted by name.
@@ -188,5 +156,15 @@ func List(dir, ext string) []string {
 	if err != nil {
 		return nil
 	}
+	sort.Strings(matches)
 	return matches
+}
+
+func contains(list []string, want string) bool {
+	for _, item := range list {
+		if item == want {
+			return true
+		}
+	}
+	return false
 }
