@@ -1,11 +1,19 @@
-"""agentrun: run a Dada agent from its repo on a laptop or CI box.
+"""agentrun: run a Dada agent from its own repo on a laptop or CI box.
 
-The repo is the spec: ``agentrun.toml`` names project/env/agent and the prompt
-file (default ``agents/<name>/core.md``). Tool URLs and headers come from the
-console (``DADA_TOKEN``) or from ``[[tools]]`` in agentrun.toml. Model
-credentials come from ``MODEL_API_KEY`` / ``MODEL`` / ``MODEL_BASE_URL``
-in the environment or ``.agentrun.env`` next to agentrun.toml. No kubectl, no
-docker login: only Docker and the public agent image.
+The repo is the spec and ``.dada/agent.json`` is its only manifest, the same
+one ``agentkit/repospec.py`` already gates. Everything that describes the agent
+lives under ``agents/<name>/``:
+
+    core.md                 system prompt, read by the runtime in production
+    domains/<skill>.md      skills, served through load_skill
+    runtime.yaml            model, tools, image: how to start this agent
+    evals/suites/*.yaml     deterministic marker scenarios
+    judge/*.yaml            the LLM-as-a-judge rules the same agent is scored by
+
+There is no second manifest: no file outside ``.dada/agent.json`` knows the
+agent name. Model credentials come from the environment or ``.agentrun.env``
+(git-ignored) using the variable names ``runtime.yaml`` declares. No kubectl,
+no docker login: only Docker and the public agent image.
 """
 
 from __future__ import annotations
@@ -17,7 +25,6 @@ import shutil
 import subprocess
 import sys
 import time
-import tomllib
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -49,16 +56,71 @@ def load_dotenv(path: Path) -> None:
         os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
 
 
-def load_spec(repo: Path) -> dict:
-    path = repo / "agentrun.toml"
+MANIFEST = Path(".dada") / "agent.json"
+
+
+def load_manifest(repo: Path, agent: str | None) -> dict:
+    """Return the manifest entry for one agent, with paths resolved.
+
+    Reads ``.dada/agent.json`` (version 1 or 2). Version 2 adds the optional
+    ``runtime`` / ``suites`` / ``judges`` / ``console`` / ``langfuse`` keys; a
+    version 1 manifest still runs, it just has no runtime file to read.
+    """
+    path = repo / MANIFEST
     if not path.exists():
-        die(f"{path} not found; see README")
-    spec = tomllib.loads(path.read_text())
-    for key in ("project", "env", "agent", "prompt"):
-        if not spec.get(key):
-            die(f"agentrun.toml: '{key}' is required")
+        die(f"{path} not found: the repo declares no agent (see docs/AGENT-REPO-SPEC.md)")
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        die(f"{MANIFEST}: {exc}")
+    agents = data.get("agents")
+    if not isinstance(agents, list) or not agents:
+        die(f"{MANIFEST}: agents must be a non-empty list")
+
+    if agent:
+        entry = next((a for a in agents if a.get("name") == agent), None)
+        if entry is None:
+            die(f"{MANIFEST}: no agent named {agent!r}; have {[a.get('name') for a in agents]}")
+    elif len(agents) == 1:
+        entry = agents[0]
+    else:
+        die(f"pass --agent; {MANIFEST} declares {[a.get('name') for a in agents]}")
+
+    name = entry.get("name")
+    if not name:
+        die(f"{MANIFEST}: an agent entry has no name")
+    root = repo / entry.get("agents_root", ".")
+    spec_dir = root / "agents" / name
+    if not (spec_dir / "core.md").exists():
+        die(f"{spec_dir / 'core.md'} not found: agents_root/name do not point at an agent")
+
     load_dotenv(repo / ".agentrun.env")
-    return spec
+    return {
+        "name": name,
+        "dir": spec_dir,
+        "prompt": spec_dir / "core.md",
+        "runtime": repo / entry["runtime"] if entry.get("runtime") else spec_dir / "runtime.yaml",
+        "suites": repo / entry["suites"] if entry.get("suites") else spec_dir / "evals" / "suites",
+        "judges": repo / entry["judges"] if entry.get("judges") else spec_dir / "judge",
+        "console": entry.get("console") or {},
+        "langfuse": entry.get("langfuse") or {},
+        "cases": repo / entry["cases"] if entry.get("cases") else None,
+        "holdout_threshold": entry.get("holdout_threshold"),
+    }
+
+
+def load_runtime(path: Path) -> dict:
+    """Parse runtime.yaml: model, tools, image. Missing file means defaults."""
+    if not path.exists():
+        return {}
+    try:
+        import yaml
+    except ImportError:
+        die("runtime.yaml needs PyYAML: pip install pyyaml")
+    data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    if not isinstance(data, dict):
+        die(f"{path}: must hold a mapping")
+    return data
 
 
 def http_json(method: str, url: str, body=None, headers: dict | None = None, timeout: float = 30) -> tuple[int, dict | str]:
@@ -111,12 +173,16 @@ def resolve_app(token: str, project: str, env: str, app: str) -> dict:
 
 def console_tools(token: str, spec: dict) -> list[dict]:
     """Tools of the agent as the console knows them, in-cluster URLs rewritten to public ones."""
-    ref = console_get(token, "/api/v1/resolve?" + urllib.parse.urlencode({"project": spec["project"], "env": spec["env"]}))
+    console = spec["console"]
+    project, env = console.get("project"), console.get("env")
+    if not (project and env):
+        die("console lookup needs console.project and console.env in .dada/agent.json")
+    ref = console_get(token, "/api/v1/resolve?" + urllib.parse.urlencode({"project": project, "env": env}))
     pid, eid = ref["project"]["id"], ref["environment"]["id"]
     agents = console_get(token, f"/api/v1/projects/{pid}/environments/{eid}/agents")
     items = agents if isinstance(agents, list) else agents.get("items") or agents.get("agents") or []
     for a in items:
-        if a.get("name") != spec["agent"]:
+        if a.get("name") != spec["name"]:
             continue
         tools = ((a.get("summary_json") or {}).get("spec") or {}).get("tools") or []
         out = []
@@ -125,49 +191,69 @@ def console_tools(token: str, spec: dict) -> list[dict]:
             host = urllib.parse.urlsplit(url).hostname or ""
             if host.endswith(".svc.cluster.local"):
                 app = host.split(".")[0].removesuffix("-service")
-                public = resolve_app(token, spec["project"], spec["env"], app).get("app", {}).get("url")
+                public = resolve_app(token, project, env, app).get("app", {}).get("url")
                 if not public:
-                    die(f"tool {t.get('name')}: app {app} has no public url; set [[tools]] url in agentrun.toml")
+                    die(f"tool {t.get('name')}: app {app} has no public url; set tools in runtime.yaml")
                 url = public.rstrip("/") + urllib.parse.urlsplit(url).path
             out.append({"url": url, "headers": {h["name"]: h["value"] for h in t.get("headers") or []}, "timeout": t.get("timeout") or 30})
         return out
-    die(f"agent {spec['agent']} not found in console {spec['project']}/{spec['env']}")
+    die(f"agent {spec['name']} not found in console {project}/{env}")
     return []
 
 
-def tools_for(spec: dict, args: argparse.Namespace) -> list[dict]:
+def tool_headers(entry: dict) -> dict:
+    """Headers for one runtime.yaml tool: literal headers plus any headers_env."""
+    headers = dict(entry.get("headers") or {})
+    env_name = entry.get("headers_env")
+    if env_name:
+        raw = os.environ.get(env_name)
+        if not raw:
+            die(f"runtime.yaml: tool declares headers_env {env_name} but it is not set")
+        for part in raw.split("\n"):
+            if ":" in part:
+                key, value = part.split(":", 1)
+                headers[key.strip()] = value.strip()
+    return headers
+
+
+def tools_for(spec: dict, runtime: dict, args: argparse.Namespace) -> list[dict]:
     if args.mcp:
         return [{"url": u, "headers": {}, "timeout": 30} for u in args.mcp]
-    if spec.get("tools"):
-        return [{"url": t["url"], "headers": dict(t.get("headers") or {}), "timeout": int(t.get("timeout") or 30)} for t in spec["tools"]]
+    declared = runtime.get("tools") or []
+    if declared:
+        return [{"url": t["url"], "headers": tool_headers(t), "timeout": int(t.get("timeout") or 30)}
+                for t in declared]
     token = console_token()
     if not token:
-        die("no tools: set [[tools]] in agentrun.toml, pass --mcp URL, or export DADA_TOKEN / DADA_CLIENT_ID+DADA_CLIENT_SECRET")
+        die("no tools: declare them in runtime.yaml, pass --mcp URL, or export DADA_TOKEN / DADA_CLIENT_ID+DADA_CLIENT_SECRET")
     tools = console_tools(token, spec)
     if not tools:
-        die(f"console has no tools for {spec['agent']}; set [[tools]] in agentrun.toml or pass --mcp URL")
+        die(f"console has no tools for {spec['name']}; declare them in runtime.yaml or pass --mcp URL")
     return tools
 
 
 def render(repo: Path, spec: dict, args: argparse.Namespace) -> Path:
-    api_key = os.environ.get("MODEL_API_KEY")
+    runtime = load_runtime(spec["runtime"])
+    model = runtime.get("model") or {}
+    key_env = model.get("api_key_env", "MODEL_API_KEY")
+    api_key = os.environ.get(key_env)
     if not api_key:
-        die("MODEL_API_KEY is not set (environment or .agentrun.env)")
-    prompt_path = repo / (args.core or spec["prompt"])
+        die(f"{key_env} is not set (environment or .agentrun.env)")
+    prompt_path = Path(args.core).resolve() if args.core else spec["prompt"]
     if not prompt_path.exists():
         die(f"prompt file {prompt_path} not found")
-    tools = tools_for(spec, args)
-    name = spec["agent"]
+    tools = tools_for(spec, runtime, args)
+    name = spec["name"]
     config = {
         "model": {
             "type": "openai",
-            "model": os.environ.get("MODEL", spec.get("model", DEFAULT_MODEL)),
-            "base_url": os.environ.get("MODEL_BASE_URL", spec.get("model_base_url", DEFAULT_MODEL_BASE_URL)),
-            "max_tokens": int(spec.get("max_tokens", 2048)),
-            "reasoning_effort": spec.get("reasoning_effort", "low"),
-            "api_format": "chatCompletions",
+            "model": os.environ.get("MODEL", model.get("name", DEFAULT_MODEL)),
+            "base_url": os.environ.get("MODEL_BASE_URL", model.get("base_url", DEFAULT_MODEL_BASE_URL)),
+            "max_tokens": int(model.get("max_tokens", 2048)),
+            "reasoning_effort": model.get("reasoning_effort", "low"),
+            "api_format": model.get("api_format", "chatCompletions"),
         },
-        "description": spec.get("description", name),
+        "description": runtime.get("description", name),
         "instruction": prompt_path.read_text(),
         "http_tools": [
             {"params": {"url": t["url"], "headers": t["headers"], "timeout": t["timeout"], "terminate_on_close": True},
@@ -196,12 +282,13 @@ def render(repo: Path, spec: dict, args: argparse.Namespace) -> Path:
     env_path.write_text("".join(f"{k}={v}\n" for k, v in env.items()))
     env_path.chmod(0o600)
     dotenv = {
-        "AGENT_NAME": name, "AGENT_IMAGE": os.environ.get("AGENT_IMAGE", spec.get("image", DEFAULT_AGENT_IMAGE)),
+        "AGENT_NAME": name, "AGENT_IMAGE": os.environ.get("AGENT_IMAGE", runtime.get("image", DEFAULT_AGENT_IMAGE)),
         "AGENT_PORT": str(args.agent_port), "AGENTRUN_STATE": str(state), "AGENTRUN_TOOLS": str(TOOLS_DIR),
         "COMPOSE_PROJECT_NAME": f"agentrun-{name}",
     }
     (state / ".env").write_text("".join(f"{k}={v}\n" for k, v in dotenv.items()))
-    print(f"agent {name}  prompt {prompt_path.relative_to(repo)}  model {config['model']['model']}")
+    shown = prompt_path.relative_to(repo) if prompt_path.is_relative_to(repo) else prompt_path
+    print(f"agent {name}  prompt {shown}  model {config['model']['model']}")
     for t in tools:
         print(f"tool  {t['url']}" + ("  (+headers)" if t["headers"] else ""))
     return state
@@ -221,7 +308,7 @@ def state_dir(args: argparse.Namespace) -> Path:
 
 def cmd_up(args: argparse.Namespace) -> None:
     repo = Path(args.repo).resolve()
-    spec = load_spec(repo)
+    spec = load_manifest(repo, args.agent)
     state = render(repo, spec, args)
     if compose(state, "up", "-d", "--wait", "--remove-orphans").returncode != 0:
         compose(state, "logs", "--tail", "80")
@@ -260,15 +347,46 @@ def cmd_smoke(args: argparse.Namespace) -> None:
     sys.exit(0 if ok else 1)
 
 
+def cmd_spec(args: argparse.Namespace) -> None:
+    """Print what the manifest resolves to, so a broken layout is visible before `up`."""
+    repo = Path(args.repo).resolve()
+    spec = load_manifest(repo, args.agent)
+    runtime = load_runtime(spec["runtime"])
+    model = runtime.get("model") or {}
+    suites = sorted(spec["suites"].glob("*.yaml")) if spec["suites"].is_dir() else []
+    judges = sorted(spec["judges"].glob("*.yaml")) if spec["judges"].is_dir() else []
+    domains = sorted((spec["dir"] / "domains").glob("*.md")) if (spec["dir"] / "domains").is_dir() else []
+
+    print(f"agent      {spec['name']}")
+    print(f"spec dir   {spec['dir']}")
+    print(f"prompt     {spec['prompt'].name}  ({len(spec['prompt'].read_text())} chars)")
+    print(f"domains    {len(domains)}: {', '.join(d.stem for d in domains) or '-'}")
+    print(f"runtime    {spec['runtime'].name if spec['runtime'].exists() else 'MISSING'}"
+          f"  model={model.get('name', '-')}  tools={len(runtime.get('tools') or [])}")
+    print(f"suites     {len(suites)}: {', '.join(s.stem for s in suites) or '-'}")
+    print(f"judges     {len(judges)}: {', '.join(j.stem for j in judges) or '-'}")
+    if spec["cases"]:
+        exists = "ok" if spec["cases"].exists() else "MISSING"
+        print(f"cases      {spec['cases'].relative_to(repo)} ({exists}, threshold {spec['holdout_threshold']})")
+    if spec["console"]:
+        print(f"console    {spec['console'].get('project')}/{spec['console'].get('env')}")
+    if spec["langfuse"]:
+        print(f"langfuse   dataset prefix {spec['langfuse'].get('dataset_prefix')}")
+
+
 def main() -> None:
     p = argparse.ArgumentParser(prog="agentrun", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--repo", default=".", help="agent repo containing agentrun.toml (default: cwd)")
+    p.add_argument("--repo", default=".", help="agent repo holding .dada/agent.json (default: cwd)")
+    p.add_argument("--agent", help="agent name; required only when the manifest declares several")
     p.add_argument("--agent-port", type=int, default=18081)
     sub = p.add_subparsers(dest="cmd", required=True)
 
-    up = sub.add_parser("up", help="render config from the repo and start the agent")
-    up.add_argument("--core", help="prompt file to use instead of agentrun.toml 'prompt' (experiments)")
-    up.add_argument("--mcp", action="append", metavar="URL", help="MCP server URL(s); overrides console/agentrun.toml tools")
+    spec = sub.add_parser("spec", help="show what the manifest resolves to")
+    spec.set_defaults(func=cmd_spec)
+
+    up = sub.add_parser("up", help="render config from the spec and start the agent")
+    up.add_argument("--core", help="prompt file to use instead of agents/<name>/core.md (experiments)")
+    up.add_argument("--mcp", action="append", metavar="URL", help="MCP server URL(s); overrides runtime.yaml tools")
     up.set_defaults(func=cmd_up)
 
     sub.add_parser("down", help="stop the agent").set_defaults(func=cmd_down)
@@ -284,7 +402,11 @@ def main() -> None:
     smoke.set_defaults(func=cmd_smoke)
 
     args = p.parse_args()
-    args.func(args)
+    try:
+        args.func(args)
+    except BrokenPipeError:
+        os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+        sys.exit(0)
 
 
 if __name__ == "__main__":
