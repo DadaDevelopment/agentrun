@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 
 	"github.com/dada-tuda/ddc/internal/agentrun"
 	"github.com/dada-tuda/ddc/internal/agentspec"
@@ -17,6 +18,45 @@ import (
 // client are the agent team's business, while ddc only guarantees that a local
 // agent is running and that CI invokes exactly what a developer invokes.
 const evalEntrypoint = "scripts/eval_run.py"
+
+// extraEvalArgs are runner flags supplied through DDC_EVAL_ARGS.
+//
+// A pipeline needs to label a run, pick an environment and set a gate, and
+// those belong to the repo's runner rather than to ddc: inventing a ddc flag
+// per runner option would make ddc the place every eval convention has to be
+// re-implemented. Quoting follows the shell's rules for simple quoted words.
+func extraEvalArgs() []string {
+	raw := strings.TrimSpace(os.Getenv("DDC_EVAL_ARGS"))
+	if raw == "" {
+		return nil
+	}
+	var args []string
+	var current strings.Builder
+	quote := rune(0)
+	for _, r := range raw {
+		switch {
+		case quote != 0:
+			if r == quote {
+				quote = 0
+			} else {
+				current.WriteRune(r)
+			}
+		case r == '\'' || r == '"':
+			quote = r
+		case r == ' ' || r == '\t' || r == '\n':
+			if current.Len() > 0 {
+				args = append(args, current.String())
+				current.Reset()
+			}
+		default:
+			current.WriteRune(r)
+		}
+	}
+	if current.Len() > 0 {
+		args = append(args, current.String())
+	}
+	return args
+}
 
 // AgentEval runs the repo's eval suites against a locally running agent.
 //
@@ -51,6 +91,7 @@ func AgentEval(ctx context.Context, cfg Config, opts AgentOptions, out io.Writer
 	if opts.Suite != "" {
 		args = append(args, "--suite", opts.Suite)
 	}
+	args = append(args, extraEvalArgs()...)
 	fmt.Fprintf(out, "eval %s via %s\n", spec.Name, evalEntrypoint)
 
 	cmd := exec.CommandContext(ctx, python, args...)
