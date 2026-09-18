@@ -1,58 +1,65 @@
-# agentrun
+# ddc
 
-Run a production Dada agent on your laptop (or a CI box) straight from its agent
-repo such as [tg-agent-tools](https://github.com/DadaDevelopment/tg-agent-tools).
-Same image as prod, your prompt, the prod MCP tools.
-
-The agent repo is the spec, and it already declares itself: `.dada/agent.json`
-(the `AGENT-REPO-SPEC` manifest the console reads) names the agent, and
-`agents/<name>/` holds everything about it. agentrun adds no manifest of its
-own - it reads that one.
+The Dada Cloud CLI. One binary, two jobs: deploy an app, and run the agent a
+repo describes.
 
 ```
-agents/<name>/
-  core.md              prompt, the same file the prod runtime serves
-  domains/*.md         skills, served through load_skill
-  runtime.yaml         how to start it: model, tools, image
-  evals/suites/*.yaml  deterministic marker scenarios
-  judge/*.yaml         llm-as-judge rules and prompt
+usage: ddc <command>
+
+commands:
+  login            sign in via your browser (device code flow)
+  deploy [dir]     package and deploy dir (default: current directory)
+  agent <action>   run the agent described by this repo's .dada/agent.json
 ```
 
-```
-eval.py / persona_eval.py --url http://127.0.0.1:18081/   -> agent (A2A), like prod eval
-
-agent    ghcr.io/kagent-dev/kagent/app (upstream, public), config.json rendered from the spec
-tools    runtime.yaml tools / console (DADA_TOKEN) / --mcp URL, in that priority;
-         in-cluster .svc.cluster.local tool URLs are rewritten to the app's public URL
-```
+This repo is public on purpose: it is the only part of Dada Cloud users install
+on their own machines, so the console can stay private without breaking
+`install.sh`.
 
 ## Install
 
 ```bash
-uv tool install git+https://github.com/DadaDevelopment/agentrun
+curl -fsSL https://raw.githubusercontent.com/DadaDevelopment/ddc/main/install.sh | sh
 ```
 
-or `pipx install git+https://github.com/DadaDevelopment/agentrun`. Stdlib only,
-Python >= 3.10. Prerequisites: Docker (compose v2). The kagent app image is
-public, so no `docker login` is needed. On Apple Silicon the image runs under
-amd64 emulation, first turn ~15 s.
+Go 1.25, no third-party dependencies. `ddc agent` additionally needs Docker.
 
-## Agent repo setup
+## ddc agent
 
-`.dada/agent.json` - the manifest (v1 fields keep working, v2 adds the rest):
+An agent repo already declares itself in `.dada/agent.json` - the manifest the
+console reads. `ddc agent` reads the same file, so there is no second manifest
+to drift:
+
+```
+agents/<name>/
+  core.md              prompt, the file the prod runtime serves
+  domains/*.md         skills, served through load_skill
+  evals/suites/*.yaml  deterministic eval scenarios
+  judge/*.yaml         llm-as-judge rules and prompts
+```
+
+The manifest adds how to run it, so local, CI and prod start the agent from one
+description. `version` stays `1`: the console's reader accepts only version 1
+and ignores keys it does not know, so these fields are additive.
 
 ```json
 {
-  "version": 2,
+  "version": 1,
   "agents": [
     {
       "name": "tg-exchange-support",
       "agents_root": ".",
       "cases": "evals/referral/cases.jsonl",
       "holdout_threshold": 0.75,
-      "runtime": "agents/tg-exchange-support/runtime.yaml",
-      "suites": "agents/tg-exchange-support/evals/suites",
-      "judges": "agents/tg-exchange-support/judge",
+      "runtime": {
+        "image": "ghcr.io/kagent-dev/kagent/app:0.10.0-rc3",
+        "model": {
+          "name": "glm-5.3-flash",
+          "base_url": "https://api.z.ai/api/coding/paas/v4",
+          "api_key_env": "MODEL_API_KEY"
+        },
+        "tools": [{ "url": "https://tools.example/mcp" }]
+      },
       "console": { "project": "agent-sandbox", "env": "prod" },
       "langfuse": { "dataset_prefix": "tg-exchange-support" }
     }
@@ -60,86 +67,38 @@ amd64 emulation, first turn ~15 s.
 }
 ```
 
-`agents/<name>/runtime.yaml` - what the spec never described before: model,
-tools, image. Names of env vars only, never secret values:
-
-```yaml
-model:
-  name: glm-5.3-flash
-  base_url: https://api.z.ai/api/coding/paas/v4
-  api_key_env: MODEL_API_KEY
-  max_tokens: 2048
-tools:
-  - url: https://tg-agent-tools-624109.dada-tuda.ru/mcp
-    # headers_env: TOOL_HEADERS      # "Name: value" per line, for private servers
-image: ghcr.io/kagent-dev/kagent/app:0.10.0-rc3
-```
-
-`.agentrun.env` (gitignored) or the environment:
+Only the *name* of the key variable is stored. Secrets come from the
+environment or `.ddc/.env` (gitignore `.ddc/`).
 
 ```bash
-MODEL_API_KEY=...            # required, name configurable via model.api_key_env
-MODEL=glm-5.3-flash          # optional override
-MODEL_BASE_URL=...           # optional override
-DADA_TOKEN=...               # only if runtime.yaml declares no tools
-# or DADA_CLIENT_ID / DADA_CLIENT_SECRET for the client-credentials flow
+cd my-agent-repo
+ddc agent spec       # what the manifest resolves to - run this when a layout looks wrong
+ddc agent up         # start the agent from the spec
+ddc agent smoke      # one real A2A turn, exit 1 on silence
+ddc agent logs -f
+ddc agent down
 ```
 
-## Run
+Flags: `--repo`, `--agent` (when the manifest declares several), `--prompt` to
+try another prompt without touching the spec, `--mcp URL` (repeatable) to
+override the tool servers, `--port` (default 18081).
 
-```bash
-cd tg-agent-tools
-printf '.agentrun/\n.agentrun.env\n' >> .gitignore
-agentrun spec                            # what the manifest resolves to
-agentrun up                              # render + start
-agentrun smoke                           # one real A2A turn, exit 1 on silence
-python3 eval.py --url http://127.0.0.1:18081/
-agentrun logs -f
-agentrun down
-```
+Tool priority: `--mcp`, then `runtime.tools`, then the console - with
+`console.project`/`env` set, `ddc` asks the API which tools the agent runs with
+in production and rewrites in-cluster URLs to their public ones.
 
-`agentrun spec` prints the resolved prompt, domains, runtime, suites and judges -
-run it first when a layout looks wrong, it fails loudly instead of `up` failing
-obscurely.
+The agent runs in the production kagent image, so the model client, the MCP
+toolset and the A2A server are the prod ones. The rendered config is copied
+into the container rather than bind-mounted, so a remote or docker-in-docker
+daemon works the same. `up` returns only once the agent answers `/health`.
 
-Prompt edits need `agentrun up` again (config.json is rendered at `up`).
-`agentrun up --core agents/<name>/experiments/foo.md` renders a different prompt
-without touching the spec; `up --mcp http://.../mcp` overrides the tool list.
-`--agent NAME` picks one when the manifest declares several.
+## Langfuse naming contract
 
-## State
-
-`.agentrun/` holds the rendered `config.json`, `agent-card.json`, env files
-(mode 0600) and the compose `.env`. Delete it to start clean.
-
-## CI
-
-The workflow lives in the agent repo (`.github/workflows/eval.yml`), because the
-cases, the judge and the threshold live there. One source of truth: the cases
-are `agents/<name>/evals/suites/*.yaml`, they are synced into a Langfuse
-dataset, and the experiment run produces the numbers that the CI gate and the
-dashboard both read.
+Several layers score the same agent into one project, so they must not average
+into one meaningless number:
 
 ```
-spec + up      the agent must resolve and answer at all, else the job fails early
-sync dataset   scripts/eval_sync.py pushes the suites into a Langfuse dataset
-               (idempotent, items keyed by scenario id)
-experiment     scripts/eval_run.py runs dataset.run_experiment: every turn is a
-               traced A2A generation, every assertion is a Langfuse score
-artifacts      report.json (schema_version 2, per-scenario latency + failure
-               reason + trace id + dataset_run_url), summary.md, history.jsonl
-dashboard      scripts/eval_dashboard.py renders the history with a Langfuse
-               link per run
-gate           --fail-below <rate>, reading the same pass_rate Langfuse stored
-```
-
-### Langfuse naming contract
-
-Several layers score the same agent into one Langfuse project, so they must not
-average into one meaningless number:
-
-```
-environment   local | ci | production        (Langfuse(environment=...))
+environment   local | ci | production
 score name    suite.*     marker assertions from the eval suites
               turn.*      the runtime turn judge
               funnel.*    the funnel judge
@@ -147,12 +106,10 @@ dataset       <dataset_prefix>-<suite>
 run_name      ci-<run_id>                    always unique
 ```
 
-`run_name` must be unique per run: deleting dataset runs in Langfuse is
-eventually consistent, and runs sharing a name show up merged for a while.
-A managed evaluator should filter `environment = production`, or it burns quota
-scoring CI traces.
+`run_name` must be unique per run: deleting dataset runs is eventually
+consistent, and runs sharing a name appear merged for a while. A managed
+evaluator should filter `environment = production`, or it burns quota scoring
+CI traces.
 
-Secrets: `MODEL_API_KEY`, `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY`,
-`LANGFUSE_HOST`. Raising `--fail-below` ratchets quality up as the prompt
-improves. Adding a case is a YAML edit in the suite; the next CI run syncs it
-into the dataset and scores it. Nothing is authored in the Langfuse UI.
+The eval runner, the dataset sync and the dashboard live in the agent repo,
+next to the cases and the judge they belong to.
