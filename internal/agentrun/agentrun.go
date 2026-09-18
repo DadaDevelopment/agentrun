@@ -25,7 +25,10 @@ import (
 const StateDir = ".ddc"
 
 const (
-	defaultImage     = "ghcr.io/kagent-dev/kagent/app:0.10.0-rc3"
+	// defaultImage is the Dada build of the kagent runtime, published by CI from
+	// github.com/DadaDevelopment/kagent. Running plain upstream locally would
+	// mean debugging a different runtime from the one production serves.
+	defaultImage     = "ghcr.io/dadadevelopment/kagent-app:v0.10.0-rc3-dada1"
 	defaultModel     = "glm-5.3-flash"
 	defaultBaseURL   = "https://api.z.ai/api/coding/paas/v4"
 	defaultMaxTokens = 2048

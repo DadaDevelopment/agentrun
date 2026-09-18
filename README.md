@@ -39,14 +39,13 @@ agents/<name>/
 ```
 
 Everything else has a default. `.dada/agent.json` is optional and holds only
-what genuinely belongs to the repo rather than to a person - a pinned image,
-non-default tools:
+what genuinely belongs to the repo rather than to a person - non-default tools,
+a model override, or an image pinned away from the platform default:
 
 ```json
 {
   "agents": {
     "tg-exchange-support": {
-      "image": "ghcr.io/dadadevelopment/kagent-app:v0.10.0-rc3-dada1",
       "model": { "name": "glm-5.3-flash", "api_key_env": "MODEL_API_KEY" },
       "tools": [{ "url": "https://tools.example/mcp" }]
     }
@@ -96,10 +95,10 @@ Tool priority: `--mcp`, then the tools in `.dada/agent.json`, then the console -
 ddc asks the API which tools the agent runs with in its remembered environment
 and rewrites in-cluster URLs to their public ones.
 
-The agent runs in the production kagent image - the patched one from
-[DadaDevelopment/kagent](https://github.com/DadaDevelopment/kagent), public so
-no registry login is needed - so what runs locally is what runs in production,
-tracing patch included. The rendered config is copied
+The agent runs in the production kagent image: the patched build published by
+CI from [DadaDevelopment/kagent](https://github.com/DadaDevelopment/kagent),
+which is the default so a repo pins nothing. What runs locally is what runs in
+production, tracing patch included. The rendered config is copied
 into the container rather than bind-mounted, so a remote or docker-in-docker
 daemon works the same. `up` returns only once the agent answers `/health`.
 
