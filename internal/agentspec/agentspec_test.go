@@ -114,3 +114,35 @@ func TestDiscoverSkipsDirectoriesWithoutAPrompt(t *testing.T) {
 		t.Fatalf("name = %q", spec.Name)
 	}
 }
+
+// TestDiscoverAcceptsTheConsoleManifestShape is the regression that broke CI
+// twice: the console's repospec requires version 1 with an "agents" array, so
+// a repo satisfying that gate must still be runnable by ddc.
+func TestDiscoverAcceptsTheConsoleManifestShape(t *testing.T) {
+	dir := t.TempDir()
+	write(t, filepath.Join(dir, "agents", "roman", "core.md"), "p")
+	write(t, filepath.Join(dir, OverridePath), `{"version":1,"agents":[
+{"name":"roman","agents_root":".","cases":"c.jsonl","holdout_threshold":0.75,
+ "runtime":{"image":"img:1","model":{"name":"m"},"tools":[{"url":"https://x/mcp"}]}},
+{"name":"other","runtime":{"image":"nope"}}]}`)
+
+	spec, err := Discover(dir, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if spec.Runtime.Image != "img:1" || spec.Runtime.Model.Name != "m" {
+		t.Fatalf("runtime = %+v", spec.Runtime)
+	}
+	if len(spec.Runtime.Tools) != 1 {
+		t.Fatalf("tools = %+v", spec.Runtime.Tools)
+	}
+}
+
+func TestDiscoverRejectsAnUnreadableOverride(t *testing.T) {
+	dir := t.TempDir()
+	write(t, filepath.Join(dir, "agents", "roman", "core.md"), "p")
+	write(t, filepath.Join(dir, OverridePath), `{"agents":"not a collection"}`)
+	if _, err := Discover(dir, ""); err == nil || !strings.Contains(err.Error(), "agents must be") {
+		t.Fatalf("err = %v", err)
+	}
+}

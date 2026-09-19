@@ -53,8 +53,43 @@ type Runtime struct {
 	Tools       []Tool `json:"tools,omitempty"`
 }
 
+// override is the optional per-repo file. Two shapes are accepted because two
+// readers own this path: the console's repospec requires the v1 shape
+// (version 1 plus an "agents" array of entries carrying a name), while ddc
+// prefers a name-keyed map. Refusing the v1 shape here would mean a repo
+// cannot satisfy both tools at once - which is exactly how this file was
+// broken twice.
 type override struct {
-	Agents map[string]Runtime `json:"agents"`
+	Version int             `json:"version"`
+	Agents  json.RawMessage `json:"agents"`
+}
+
+// v1Entry is one element of the console's "agents" array. Only the fields ddc
+// runs with are read; the gate's own fields are none of ddc's business.
+type v1Entry struct {
+	Name    string  `json:"name"`
+	Runtime Runtime `json:"runtime"`
+}
+
+// runtimeFor extracts one agent's runtime from either accepted shape.
+func (o override) runtimeFor(name string) (Runtime, error) {
+	if len(o.Agents) == 0 {
+		return Runtime{}, nil
+	}
+	var byName map[string]Runtime
+	if err := json.Unmarshal(o.Agents, &byName); err == nil {
+		return byName[name], nil
+	}
+	var list []v1Entry
+	if err := json.Unmarshal(o.Agents, &list); err != nil {
+		return Runtime{}, fmt.Errorf("%s: agents must be an object keyed by agent name, or the console's array of entries", OverridePath)
+	}
+	for _, entry := range list {
+		if entry.Name == name {
+			return entry.Runtime, nil
+		}
+	}
+	return Runtime{}, nil
 }
 
 // Spec is one agent as found in a repository.
@@ -147,7 +182,7 @@ func loadOverride(repo, name string) (Runtime, error) {
 	if err := json.Unmarshal(raw, &file); err != nil {
 		return Runtime{}, fmt.Errorf("%s: %w", OverridePath, err)
 	}
-	return file.Agents[name], nil
+	return file.runtimeFor(name)
 }
 
 // List returns the files in dir with the given extension, sorted by name.

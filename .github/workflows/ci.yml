@@ -1,0 +1,59 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+
+      - name: gofmt
+        run: test -z "$(gofmt -l .)" || { echo "gofmt violations:"; gofmt -l .; exit 1; }
+
+      - run: go vet ./...
+
+      - run: go test ./...
+
+      - name: Build
+        run: go build -o /tmp/ddc .
+
+      - name: Read a real agent repo
+        run: |
+          set -euo pipefail
+          repo="$RUNNER_TEMP/sample"
+          mkdir -p "$repo/agents/sample/domains" "$repo/agents/sample/evals/suites" "$repo/.dada"
+          echo "be helpful" > "$repo/agents/sample/core.md"
+          echo "prices" > "$repo/agents/sample/domains/pricing.md"
+          echo "cases: []" > "$repo/agents/sample/evals/suites/markers.yaml"
+          cat > "$repo/.dada/agent.json" <<'JSON'
+          {"version":1,"agents":[{"name":"sample","agents_root":".","cases":"c.jsonl",
+           "holdout_threshold":0.75,
+           "runtime":{"model":{"name":"m"},"tools":[{"url":"https://example/mcp"}]}}]}
+          JSON
+          /tmp/ddc agent spec --repo "$repo" | tee "$RUNNER_TEMP/spec.txt"
+          grep -q "tools=1" "$RUNNER_TEMP/spec.txt"
+          grep -q "model=m" "$RUNNER_TEMP/spec.txt"
+
+      - name: Read the same repo with no manifest at all
+        run: |
+          set -euo pipefail
+          repo="$RUNNER_TEMP/bare"
+          mkdir -p "$repo/agents/sample"
+          echo "be helpful" > "$repo/agents/sample/core.md"
+          /tmp/ddc agent spec --repo "$repo" | grep -q "agent      sample"
