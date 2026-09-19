@@ -66,5 +66,8 @@ jobs:
           set -euo pipefail
           DDC_INSTALL_DIR="$RUNNER_TEMP/bin" DDC_RELEASE_TAG="${{ steps.meta.outputs.tag }}" \
             sh install.sh
-          "$RUNNER_TEMP/bin/ddc" agent 2>&1 | head -3
-          "$RUNNER_TEMP/bin/ddc" agent spec --repo . 2>&1 | head -2 || true
+          repo="$RUNNER_TEMP/sample"
+          mkdir -p "$repo/agents/sample"
+          echo "be helpful" > "$repo/agents/sample/core.md"
+          "$RUNNER_TEMP/bin/ddc" agent spec --repo "$repo" | tee "$RUNNER_TEMP/spec.txt"
+          grep -q "agent      sample" "$RUNNER_TEMP/spec.txt"
